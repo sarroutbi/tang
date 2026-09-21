@@ -47,6 +47,10 @@ adv_second_phase () {
     fetch "${ENDPOINT}"/adv | ver $TMP/db/sig.jwk
     fetch "${ENDPOINT}"/adv/ | ver $TMP/db/sig.jwk
 
+    # Verify Tang-Capabilities header advertises tang_pub
+    fetch_headers "${ENDPOINT}"/adv $TMP/adv_headers
+    grep -q "Tang-Capabilities:.*tang_pub" $TMP/adv_headers
+
     # Fetching by any thumbprint should work
     fetch "${ENDPOINT}"/adv/`jose jwk thp -i $TMP/db/sig.jwk` | ver $TMP/db/sig.jwk
     fetch "${ENDPOINT}"/adv/`jose jwk thp -a S512 -i $TMP/db/sig.jwk` | ver $TMP/db/sig.jwk

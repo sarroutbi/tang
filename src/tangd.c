@@ -100,6 +100,7 @@ adv(http_method_t method, const char *path, const char *body,
 
     return http_reply(HTTP_STATUS_OK,
                       "Content-Type: application/jose+json\r\n"
+                      "Tang-Capabilities: tang_pub\r\n"
                       "Content-Length: %zu\r\n"
                       "\r\n%s", strlen(adv), adv);
 }
@@ -176,6 +177,13 @@ rec(http_method_t method, const char *path, const char *body,
         return http_reply(HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL);
 
     if (json_object_set_new(rep, "key_ops", json_pack("[s]", "deriveKey")) < 0)
+        return http_reply(HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL);
+
+    json_auto_t *pub = json_deep_copy(jwk);
+    if (!pub || !jose_jwk_pub(NULL, pub))
+        return http_reply(HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL);
+
+    if (json_object_set(rep, "tang_pub", pub) < 0)
         return http_reply(HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL);
 
     enc = json_dumps(rep, JSON_SORT_KEYS | JSON_COMPACT);

@@ -37,16 +37,16 @@ echo "Thumbprint:   $exc_kid"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-curl -sf -D "$TMP/adv_headers" -o /dev/null "$URL/adv" || {
-    echo "Error: /adv request failed" >&2
+ver_resp=$(curl -sf "$URL/version" 2>/dev/null) || {
+    echo "FAIL: /version endpoint not available (server may not support tang_pub)" >&2
     exit 1
 }
 
-if ! grep -q "Tang-Capabilities:.*tang_pub" "$TMP/adv_headers"; then
-    echo "FAIL: Tang-Capabilities header does not advertise tang_pub" >&2
+if ! printf '%s' "$ver_resp" | jose fmt -j- -Og features -Og tang_pub >/dev/null 2>&1; then
+    echo "FAIL: /version does not report tang_pub capability" >&2
     exit 1
 fi
-echo "OK: Tang-Capabilities header advertises tang_pub"
+echo "OK: /version reports tang_pub capability"
 
 jose jwk gen -i '{"alg":"ECMR"}' -o "$TMP/client.jwk"
 jose jwk pub -i "$TMP/client.jwk" -o "$TMP/client.pub.jwk"

@@ -68,12 +68,7 @@ str_cleanse(char **str)
 static void
 wipe_jwk_secret(json_t *jwk)
 {
-    json_t *k = json_object_get(jwk, "k");
-    if (k && json_is_string(k)) {
-        char *kval = (char *)json_string_value(k);
-        if (kval)
-            SECURE_WIPE(kval, strlen(kval));
-    }
+    json_object_del(jwk, "k");
 }
 
 static json_t *

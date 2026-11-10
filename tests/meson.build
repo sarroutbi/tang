@@ -18,11 +18,6 @@ test_keys = executable('test-keys',
   include_directories: incdir
 )
 
-pqc_test_args = []
-if has_explicit_bzero
-  pqc_test_args += ['-DHAVE_EXPLICIT_BZERO']
-endif
-
 if has_pqc
   test_pqc_c = configure_file(
     input: 'test-pqc.c.in',
@@ -33,8 +28,7 @@ if has_pqc
   test_pqc = executable('test-pqc',
     test_pqc_c,
     'test-util.c',
-    c_args: pqc_test_args,
-    dependencies: [jose],
+    dependencies: [jose, libcrypto],
     include_directories: incdir
   )
 endif

@@ -268,21 +268,6 @@ test_wipe_and_release(void)
 }
 
 static void
-test_str_cleanse_func(void)
-{
-    char *s = strdup("sensitive-data");
-    ASSERT(s);
-    str_cleanse(&s);
-    ASSERT(s == NULL);
-
-    char *null_str = NULL;
-    str_cleanse(&null_str);
-    ASSERT(null_str == NULL);
-
-    str_cleanse(NULL);
-}
-
-static void
 test_find_jws_kem_null_tki(void)
 {
     ASSERT(find_jws_kem(NULL, "ML-KEM-768") == NULL);
@@ -604,8 +589,7 @@ test_rec_kem_secure_success(void)
     ASSERT(pt);
 
     json_auto_t *recovered = json_loadb(pt, ptl, 0, NULL);
-    SECURE_WIPE(pt, ptl);
-    free(pt);
+    OPENSSL_clear_free(pt, ptl);
     ASSERT(recovered);
 
     const char *orig_k = json_string_value(
@@ -640,7 +624,6 @@ run_tests(void)
     test_wipe_jwk_secret_wipes();
     test_wipe_and_release_null_safety();
     test_wipe_and_release();
-    test_str_cleanse_func();
 
     test_find_jws_kem_null_tki();
     test_find_jws_kem_filtering();

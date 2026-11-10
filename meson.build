@@ -53,18 +53,13 @@ add_project_arguments(
 add_project_arguments('-DVERSION="'+meson.project_version() + '"', language : 'c')
 
 jose = dependency('jose', version: '>=8')
+libcrypto = dependency('libcrypto')
 a2x = find_program('a2x', required: false)
 compiler = meson.get_compiler('c', native : true)
 
 if meson.is_cross_build()
     compiler = meson.get_compiler('c', native : false)
 endif
-
-has_explicit_bzero = compiler.has_function(
-  'explicit_bzero',
-  prefix: '#define _DEFAULT_SOURCE\n#include <string.h>',
-  args: ['-D_DEFAULT_SOURCE'],
-)
 
 has_pqc = compiler.links('''
 #include <jose/jose.h>

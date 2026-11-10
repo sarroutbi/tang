@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <openssl/crypto.h>
 #include <jose/jose.h>
 #include <jose/b64.h>
 
@@ -36,33 +37,6 @@ str_cleanup(char **str)
 {
     if (str)
         free(*str);
-}
-
-#ifdef HAVE_EXPLICIT_BZERO
-void explicit_bzero(void *, size_t);
-#define SECURE_WIPE(ptr, len) explicit_bzero((ptr), (len))
-#elif defined(__STDC_LIB_EXT1__)
-#define SECURE_WIPE(ptr, len) memset_s((ptr), (len), 0, (len))
-#else
-static inline void
-secure_wipe_fallback(void *ptr, size_t len)
-{
-    if (!ptr)
-        return;
-    memset(ptr, 0, len);
-    __asm__ __volatile__("" : : "r"(ptr) : "memory");
-}
-#define SECURE_WIPE(ptr, len) secure_wipe_fallback((ptr), (len))
-#endif
-
-static void
-str_cleanse(char **str)
-{
-    if (str && *str) {
-        SECURE_WIPE(*str, strlen(*str));
-        free(*str);
-        *str = NULL;
-    }
 }
 
 static void
@@ -178,8 +152,7 @@ rec_kem_secure(json_t *tang_kem_priv, const json_t *req, char **out)
         return HTTP_STATUS_BAD_REQUEST;
 
     json_auto_t *payload = json_loadb(pt, ptl, 0, NULL);
-    SECURE_WIPE(pt, ptl);
-    free(pt);
+    OPENSSL_clear_free(pt, ptl);
     if (!payload)
         return HTTP_STATUS_BAD_REQUEST;
 
@@ -304,7 +277,8 @@ cleanup:
     if (tang_transport_key)
         wipe_jwk_secret(tang_transport_key);
     wipe_and_release(&enc_key);
-    str_cleanse(&enc_key_json);
+    if (enc_key_json)
+        OPENSSL_clear_free(enc_key_json, strlen(enc_key_json));
     free(tang_encrypted_key);
     json_decref(ret_encap);
     json_decref(resp_jwe);

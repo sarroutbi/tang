@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
 #include <jose/jose.h>
 #include <jose/b64.h>
 
@@ -117,8 +118,109 @@ wipe_and_release(json_t **jwk)
     }
 }
 
+#define KEM_VERSION    "hybrid-v1"
+#define SUITE_PREFIX   "ECMR+"
+#define DIR_REQUEST    "clevis-to-tang"
+#define DIR_RESPONSE   "tang-to-clevis"
+
 static int
-rec_kem_secure(json_t *tang_kem_priv, const json_t *req, char **out)
+is_valid_suite(const char *suite)
+{
+    if (!suite || strncmp(suite, SUITE_PREFIX, strlen(SUITE_PREFIX)) != 0)
+        return 0;
+
+    return is_valid_kem_alg(suite + strlen(SUITE_PREFIX));
+}
+
+static char *
+compute_req_digest(const char *protected_b64)
+{
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len = 0;
+
+    if (!EVP_Digest(protected_b64, strlen(protected_b64),
+                    hash, &hash_len, EVP_sha256(), NULL))
+        return NULL;
+
+    size_t b64_len = jose_b64_enc_buf(hash, hash_len, NULL, 0);
+    if (b64_len == SIZE_MAX)
+        return NULL;
+
+    char *digest = malloc(b64_len + 1);
+    if (!digest)
+        return NULL;
+
+    if (jose_b64_enc_buf(hash, hash_len, digest, b64_len) != b64_len) {
+        free(digest);
+        return NULL;
+    }
+    digest[b64_len] = '\0';
+    return digest;
+}
+
+static int
+header_field_matches(const json_t *header, const char *field,
+                     const char *expected)
+{
+    const char *val = json_string_value(json_object_get(header, field));
+    return val && strcmp(val, expected) == 0;
+}
+
+static int
+validate_request_protected(const json_t *blob_jwe, const char *path_kem_kid,
+                           char **out_ecmr_kid, char **out_suite)
+{
+    const char *protected_b64 = json_string_value(
+        json_object_get(blob_jwe, "protected"));
+    if (!protected_b64)
+        return 0;
+
+    size_t dec_len = jose_b64_dec_buf(
+        protected_b64, strlen(protected_b64), NULL, 0);
+    if (dec_len == SIZE_MAX)
+        return 0;
+
+    uint8_t dec_buf[dec_len + 1];
+    if (jose_b64_dec_buf(protected_b64, strlen(protected_b64),
+                         dec_buf, dec_len) != dec_len)
+        return 0;
+    dec_buf[dec_len] = '\0';
+
+    json_auto_t *header = json_loads((char *)dec_buf, 0, NULL);
+    if (!header)
+        return 0;
+
+    if (!header_field_matches(header, "msg_dir", DIR_REQUEST)
+        || !header_field_matches(header, "kem_kid", path_kem_kid)
+        || !header_field_matches(header, "kem_ver", KEM_VERSION))
+        return 0;
+
+    const char *suite = json_string_value(
+        json_object_get(header, "suite"));
+    if (!is_valid_suite(suite))
+        return 0;
+
+    const char *kid = json_string_value(
+        json_object_get(header, "kid"));
+    if (!kid)
+        return 0;
+
+    *out_ecmr_kid = strdup(kid);
+    if (!*out_ecmr_kid)
+        return 0;
+
+    *out_suite = strdup(suite);
+    if (!*out_suite) {
+        free(*out_ecmr_kid);
+        *out_ecmr_kid = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+static int
+rec_kem_secure(json_t *tang_kem_priv, const char *path_kem_kid,
+               const json_t *req, char **out)
 {
     const char *clevis_encrypted_blob = NULL;
     const char *clevis_transport_ct = NULL;
@@ -156,6 +258,15 @@ rec_kem_secure(json_t *tang_kem_priv, const json_t *req, char **out)
     if (!payload)
         return HTTP_STATUS_BAD_REQUEST;
 
+    __attribute__((cleanup(str_cleanup))) char *ecmr_kid = NULL;
+    __attribute__((cleanup(str_cleanup))) char *suite = NULL;
+    if (!validate_request_protected(blob_jwe, path_kem_kid,
+                                    &ecmr_kid, &suite))
+        return HTTP_STATUS_BAD_REQUEST;
+
+    const char *req_protected_b64 = json_string_value(
+        json_object_get(blob_jwe, "protected"));
+
     const char *clevis_kem_ct = NULL;
     const char *ek_digest = NULL;
     json_t *clevis_kem_pub = NULL;
@@ -172,9 +283,7 @@ rec_kem_secure(json_t *tang_kem_priv, const json_t *req, char **out)
 
     const char *pub_alg = json_string_value(
         json_object_get(clevis_kem_pub, "alg"));
-    if (!pub_alg || (strcmp(pub_alg, "ML-KEM-512") != 0 &&
-                     strcmp(pub_alg, "ML-KEM-768") != 0 &&
-                     strcmp(pub_alg, "ML-KEM-1024") != 0))
+    if (!is_valid_kem_alg(pub_alg))
         return HTTP_STATUS_BAD_REQUEST;
 
     if (!jose_jwk_prm(NULL, clevis_kem_pub, false, "deriveKey"))
@@ -203,6 +312,7 @@ rec_kem_secure(json_t *tang_kem_priv, const json_t *req, char **out)
     json_t *ret_encap = NULL;
     json_t *tang_transport_key = NULL;
     char *enc_key_json = NULL;
+    char *digest = NULL;
     json_t *resp_jwe = NULL;
     char *tang_encrypted_key = NULL;
     json_t *response = NULL;
@@ -242,8 +352,25 @@ rec_kem_secure(json_t *tang_kem_priv, const json_t *req, char **out)
         goto cleanup;
     }
 
+    digest = compute_req_digest(req_protected_b64);
+    if (!digest) {
+        status = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+        goto cleanup;
+    }
+
     resp_jwe = json_pack(
-        "{s:{s:s,s:s}}", "protected", "alg", "dir", "enc", "A256GCM");
+        "{s:{s:s, s:s, s:[ssssss], s:s, s:s, s:s, s:s, s:s, s:s}}",
+        "protected",
+        "alg", "dir",
+        "enc", "A256GCM",
+        "crit", "kem_ver", "suite", "kid", "kem_kid",
+                "msg_dir", "req_digest",
+        "kem_ver", KEM_VERSION,
+        "suite", suite,
+        "kid", ecmr_kid,
+        "kem_kid", path_kem_kid,
+        "msg_dir", DIR_RESPONSE,
+        "req_digest", digest);
     if (!resp_jwe) {
         status = HTTP_STATUS_INTERNAL_SERVER_ERROR;
         goto cleanup;
@@ -279,6 +406,7 @@ cleanup:
     wipe_and_release(&enc_key);
     if (enc_key_json)
         OPENSSL_clear_free(enc_key_json, strlen(enc_key_json));
+    free(digest);
     free(tang_encrypted_key);
     json_decref(ret_encap);
     json_decref(resp_jwe);
@@ -503,7 +631,7 @@ rec_kem(http_method_t method, const char *path, const char *body,
     if (!jose_jwk_prm(NULL, tang_kem_priv, true, "deriveKey"))
         return http_reply(HTTP_STATUS_FORBIDDEN, NULL);
 
-    status = rec_kem_secure(tang_kem_priv, req, &enc);
+    status = rec_kem_secure(tang_kem_priv, thp, req, &enc);
     if (status != HTTP_STATUS_OK)
         return http_reply(status, NULL);
 

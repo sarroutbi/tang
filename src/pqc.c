@@ -43,7 +43,13 @@ str_cleanup(char **str)
 static void
 wipe_jwk_secret(json_t *jwk)
 {
-    json_object_del(jwk, "k");
+    json_t *k = json_object_get(jwk, "k");
+    if (k) {
+        const char *str = json_string_value(k);
+        if (str)
+            OPENSSL_cleanse((void *)str, json_string_length(k));
+        json_object_del(jwk, "k");
+    }
 }
 
 static json_t *

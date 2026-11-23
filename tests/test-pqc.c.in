@@ -417,6 +417,76 @@ test_find_jws_kem_by_thp_lookup(void)
     remove_tempdir(tmpdir);
 }
 
+/* Rotation compatibility: a client that bound before a signing-key
+ * rotation froze the verify keys that were active at binding time,
+ * and verifies the /adv-kem/<kem_kid> fetch against them. The
+ * response must be signed with every retained signer, current and
+ * rotated, like /adv/<thp> re-adds the requested signer for the
+ * classical advertisement. */
+static void
+test_find_jws_kem_by_thp_rotated_signer(void)
+{
+    __attribute__((cleanup(str_cleanup))) char *tmpdir = copy_fixture();
+    ASSERT(tmpdir);
+
+    /* The fixture ships a rotated signing key (.r4E2wG1u...jwk). */
+    json_auto_t *kem = json_pack("{s:s}", "alg", "ML-KEM-768");
+    if (kem && jose_jwk_gen(NULL, kem)) {
+        __attribute__((cleanup(str_cleanup))) char *kem_thp =
+            dump_jwk_to_dir(kem, tmpdir);
+        ASSERT(kem_thp);
+    }
+
+    __attribute__((cleanup(cleanup_tang_keys_info)))
+        struct tang_keys_info *keys_info = read_keys(tmpdir);
+    ASSERT(keys_info);
+
+    if (!keys_info->m_has_pqc) {
+        fprintf(stderr, "No PQC support, skipping rotated signer test\n");
+        remove_tempdir(tmpdir);
+        return;
+    }
+
+    json_t *rotated = NULL;
+    size_t idx;
+    json_t *key;
+    json_array_foreach(keys_info->m_rotated_keys, idx, key) {
+        if (jwk_valid_for_signing(key)) {
+            rotated = key;
+            break;
+        }
+    }
+    ASSERT_WITH_MSG(rotated, "fixture has no rotated signing key");
+
+    json_t *current = json_array_get(keys_info->m_sign, 0);
+    ASSERT(current);
+
+    json_auto_t *kem_key = json_array_get(keys_info->m_kem_payload, 0);
+    ASSERT(kem_key);
+    __attribute__((cleanup(str_cleanup))) char *kem_thp =
+        jwk_thumbprint(kem_key, "S256");
+    ASSERT(kem_thp);
+
+    json_auto_t *signed_keys =
+        find_jws_kem_by_thp(keys_info, kem_thp);
+    ASSERT(signed_keys);
+
+    json_auto_t *current_pub = json_deep_copy(current);
+    json_auto_t *rotated_pub = json_deep_copy(rotated);
+    ASSERT(current_pub && rotated_pub);
+    ASSERT(jose_jwk_pub(NULL, current_pub));
+    ASSERT(jose_jwk_pub(NULL, rotated_pub));
+
+    /* The current signer verifies, and so does the rotated one: its
+     * public half is the verify key frozen in a pre-rotation
+     * binding. */
+    ASSERT(jose_jws_ver(NULL, signed_keys, NULL, current_pub, 1));
+    ASSERT_WITH_MSG(jose_jws_ver(NULL, signed_keys, NULL, rotated_pub, 1),
+                    "rotated signer does not verify the KEM advertisement");
+
+    remove_tempdir(tmpdir);
+}
+
 static void
 test_find_jws_kem_by_thp_rejects_non_kem(void)
 {
@@ -2231,6 +2301,7 @@ run_tests(void)
     test_find_jws_kem_empty_payload();
     test_find_jws_kem_by_thp_null();
     test_find_jws_kem_by_thp_lookup();
+    test_find_jws_kem_by_thp_rotated_signer();
     test_find_jws_kem_by_thp_rejects_non_kem();
     test_find_jws_kem_by_thp_rejects_unsupported_alg();
 

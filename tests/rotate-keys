@@ -167,13 +167,86 @@ full_resp=$(curl -sf -X POST \
 test=$(printf '%s' "$full_resp" | jose fmt -j- -Od tang_pub -o-)
 [ "$good" = "$test" ]
 
-# ... and the old (hidden) ML-KEM keys are still served by thumbprint, so
-# hybrid clients bound to them keep working too.
+# ... and the old (hidden) ML-KEM keys are still served by thumbprint,
+# so hybrid clients bound to them keep working too. The response must
+# also verify against the OLD signer: a binding made before the
+# rotation froze those verify keys, and a decrypt whose KEM-key fetch
+# cannot be verified against them fails permanently.
 if build_has_pqc; then
     for thp in $old_kem_thps; do
         kem_by_thp=$(fetch "/adv-kem/${thp}")
         printf '%s' "$kem_by_thp" | ver "${new_sig_jwk}"
+        printf '%s' "$kem_by_thp" | ver "${TMP}/db/.sig.jwk"
     done
+
+    # Decrypt-after-rotation: run a full hybrid recovery for a binding
+    # frozen before the rotation (old KEM key, old ECMR kid) -- the
+    # scenario that used to fail permanently at the KEM-key fetch.
+    if [ -n "${old_kem_thps}" ]; then
+        old_kem_thp="$(printf '%s\n' ${old_kem_thps} | head -n 1)"
+        old_kem_jwk="${TMP}/db/.${old_kem_thp}.jwk"
+        old_kem_alg="$(jose fmt -j "${old_kem_jwk}" -Og alg -u-)"
+        jose jwk pub -i "${old_kem_jwk}" -o "${TMP}/old-kem.pub.jwk"
+
+        stored_encap="$(jose jwk encap -i "${TMP}/old-kem.pub.jwk")"
+        enc_key="$(printf '%s' "${stored_encap}" | jose fmt -j- -Og ss -o-)"
+        clevis_kem_ct="$(printf '%s' "${stored_encap}" | jose fmt -j- -Og ct -u-)"
+        printf '%s' "${enc_key}" > "${TMP}/old-enc-key.jwk"
+        ek_digest="$(jose jwk thp -i "${TMP}/old-enc-key.jwk" -a S256)"
+
+        jose jwk gen -i "{\"alg\":\"${old_kem_alg}\"}" \
+            -o "${TMP}/old-clevis-kem-priv.jwk"
+        jose jwk pub -i "${TMP}/old-clevis-kem-priv.jwk" \
+            -o "${TMP}/old-clevis-kem-pub.jwk"
+
+        fwd_encap="$(jose jwk encap -i "${TMP}/old-kem.pub.jwk")"
+        clevis_transport_ct="$(printf '%s' "${fwd_encap}" \
+            | jose fmt -j- -Og ct -u-)"
+        printf '%s' "${fwd_encap}" | jose fmt -j- -Og ss -o- \
+            > "${TMP}/old-clevis-transport-key.jwk"
+
+        clevis_kem_pub="$(cat "${TMP}/old-clevis-kem-pub.jwk")"
+        printf '{"clevis_kem_ct":"%s","clevis_kem_pub":%s,"ek_digest":"%s"}' \
+            "${clevis_kem_ct}" "${clevis_kem_pub}" "${ek_digest}" \
+            > "${TMP}/old-inner-payload.json"
+
+        enriched_hdr="$(printf '{"protected":{"alg":"dir","enc":"A256GCM","crit":["kem_ver","suite","kem_kid","msg_dir"],"kem_ver":"%s","suite":"%s+%s","kid":"%s","kem_kid":"%s","msg_dir":"%s"}}' \
+            "${KEM_VERSION}" "${ECMR_ALG}" "${old_kem_alg}" "${old_exc_thp}" "${old_kem_thp}" "${DIR_REQUEST}")"
+        clevis_encrypted_blob="$(jose jwe enc \
+            -i "${enriched_hdr}" \
+            -I "${TMP}/old-inner-payload.json" \
+            -k "${TMP}/old-clevis-transport-key.jwk" -c)"
+        req_body="$(printf '{"clevis_encrypted_blob":"%s","clevis_transport_ct":"%s"}' \
+            "${clevis_encrypted_blob}" "${clevis_transport_ct}")"
+        server_resp="$(curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -d "${req_body}" \
+            "http://127.0.0.1:${PORT}/rec-kem/${old_kem_thp}")"
+
+        tang_transport_ct="$(printf '%s' "${server_resp}" \
+            | jose fmt -j- -Og tang_transport_ct -u-)"
+        tang_encrypted_key="$(printf '%s' "${server_resp}" \
+            | jose fmt -j- -Og tang_encrypted_key -u-)"
+        tang_transport_key="$(jose jwk decap \
+            -i "${TMP}/old-clevis-kem-priv.jwk" -c "${tang_transport_ct}")"
+        printf '%s' "${tang_transport_key}" \
+            > "${TMP}/old-tang-transport-key.jwk"
+
+        IFS='.' read -r prot ekey iv ct tag <<EOF
+${tang_encrypted_key}
+EOF
+        printf '{"protected":"%s","encrypted_key":"%s","iv":"%s","ciphertext":"%s","tag":"%s"}' \
+            "${prot}" "${ekey}" "${iv}" "${ct}" "${tag}" \
+            > "${TMP}/old-resp-jwe.json"
+        recovered_enc_key="$(jose jwe dec \
+            -i "${TMP}/old-resp-jwe.json" \
+            -k "${TMP}/old-tang-transport-key.jwk")"
+
+        enc_key_k="$(printf '%s' "${enc_key}" | jose fmt -j- -Og k -u-)"
+        recovered_enc_key_k="$(printf '%s' "${recovered_enc_key}" \
+            | jose fmt -j- -Og k -u-)"
+        [ "${enc_key_k}" = "${recovered_enc_key_k}" ]
+    fi
 fi
 
 # Rotation is repeatable: a second rotation hides the current set and

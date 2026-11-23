@@ -772,7 +772,26 @@ find_jws_kem_by_thp(struct tang_keys_info *keys_info, const char *thumbprint)
     if (json_array_append(payload, key) < 0)
         return NULL;
 
-    json_auto_t *signed_keys = jwk_sign(payload, keys_info->m_sign);
+    /* Sign with every retained signer, current and rotated: a client
+     * that bound before a signing-key rotation froze the verify keys
+     * that were active at binding time and verifies this fetch
+     * against them, like /adv/<thp> (find_jws) re-adds the requested
+     * signer for the classical advertisement. The URL pins the KEM
+     * key, not the old signer, so all retained signers must sign for
+     * those bindings to keep verifying across rotations. */
+    json_auto_t *sign = json_deep_copy(keys_info->m_sign);
+    if (!sign)
+        return NULL;
+    size_t idx;
+    json_t *jwk;
+    json_array_foreach(keys_info->m_rotated_keys, idx, jwk) {
+        if (!jwk_valid_for_signing(jwk))
+            continue;
+        if (json_array_append(sign, jwk) < 0)
+            return NULL;
+    }
+
+    json_auto_t *signed_keys = jwk_sign(payload, sign);
     if (!signed_keys)
         return NULL;
     return json_incref(signed_keys);

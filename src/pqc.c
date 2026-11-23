@@ -778,7 +778,14 @@ find_jws_kem_by_thp(struct tang_keys_info *keys_info, const char *thumbprint)
      * against them, like /adv/<thp> (find_jws) re-adds the requested
      * signer for the classical advertisement. The URL pins the KEM
      * key, not the old signer, so all retained signers must sign for
-     * those bindings to keep verifying across rotations. */
+     * those bindings to keep verifying across rotations.
+     *
+     * The signature is a binding-time trust mechanism: a client with
+     * no stored advertisement has no authentic verify keys, and its
+     * decrypt-time authentication of this fetch rests on the kem_kid
+     * thumbprint pin instead -- the key served for X below is the key
+     * whose thumbprint is X, so the pin cannot be satisfied with a
+     * substituted key. */
     json_auto_t *sign = json_deep_copy(keys_info->m_sign);
     if (!sign)
         return NULL;

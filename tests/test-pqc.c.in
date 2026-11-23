@@ -461,7 +461,10 @@ test_find_jws_kem_by_thp_rotated_signer(void)
     json_t *current = json_array_get(keys_info->m_sign, 0);
     ASSERT(current);
 
-    json_auto_t *kem_key = json_array_get(keys_info->m_kem_payload, 0);
+    /* Borrowed reference: owned by keys_info->m_kem_payload, must not
+     * be wrapped in json_auto_t (the cleanup would steal the array's
+     * only reference and corrupt the heap at tki release). */
+    json_t *kem_key = json_array_get(keys_info->m_kem_payload, 0);
     ASSERT(kem_key);
     __attribute__((cleanup(str_cleanup))) char *kem_thp =
         jwk_thumbprint(kem_key, "S256");

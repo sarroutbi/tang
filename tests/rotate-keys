@@ -177,6 +177,14 @@ if build_has_pqc; then
         kem_by_thp=$(fetch "/adv-kem/${thp}")
         printf '%s' "$kem_by_thp" | ver "${new_sig_jwk}"
         printf '%s' "$kem_by_thp" | ver "${TMP}/db/.sig.jwk"
+        # The pin contract must also hold for rotated keys: an online
+        # binding fetches its pinned kem_kid after the rotation, and
+        # in no-stored-adv mode the thumbprint check is the only
+        # authentication of that fetch.
+        pinned_thp=$(printf '%s' "$kem_by_thp" \
+            | jose fmt -j- -Og payload -SyOg keys -A -g 0 -o- \
+            | jose jwk thp -a S256 -i-)
+        [ "$pinned_thp" = "$thp" ]
     done
 
     # Decrypt-after-rotation: run a full hybrid recovery for a binding

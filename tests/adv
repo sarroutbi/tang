@@ -112,6 +112,17 @@ adv_kem_test () {
                     thp=$(printf '%s' "$jwk" | jose jwk thp -a "$hash_alg" -i-)
                     kem_by_thp=$(fetch "${prefix}/adv-kem/${thp}")
                     printf '%s' "$kem_by_thp" | ver $TMP/db/sig.jwk
+                    # The pin contract: the key served by thumbprint X
+                    # is the key whose thumbprint is X. In
+                    # no-stored-adv mode this is the only thing that
+                    # authenticates the fetch: the client checks it
+                    # against the kem_kid pinned in its binding, while
+                    # the JWS verify keys come from the same channel
+                    # and carry no trust there.
+                    pinned_thp=$(printf '%s' "$kem_by_thp" \
+                        | jose fmt -j- -Og payload -SyOg keys -A -g 0 -o- \
+                        | jose jwk thp -a "$hash_alg" -i-)
+                    [ "$pinned_thp" = "$thp" ]
                 done
             done
         [ $? -eq 0 ]

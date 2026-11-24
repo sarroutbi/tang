@@ -99,6 +99,14 @@ error_no_signing_keys () {
         --data-binary @$TMP/clt.pub.jwk \
         "http://127.0.0.1:${PORT}/rec/${exc_kid}")
     [ "${code}" = "500" ]
+
+    # /version must say "broken" (5xx) too, not fold the unusable key
+    # store into hybrid_recovery:false: clients gate on this answer,
+    # and a downgraded-looking server would silently bind them
+    # classical-only.
+    code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "http://127.0.0.1:${PORT}/version")
+    [ "${code}" = "500" ]
 }
 
 error_startup

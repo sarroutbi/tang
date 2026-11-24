@@ -205,9 +205,18 @@ tang_version(http_method_t method, const char *path, const char *body,
     const char *jwkdir = misc;
     int has_pqc = 0;
 
+    /* The capability report must be able to say "broken", not only
+     * "no hybrid": clients gate on this answer, and folding an
+     * unreadable key store into hybrid_recovery:false would make a
+     * broken server look like a legitimately downgraded one. Answer
+     * 5xx for an unusable key store, like the other endpoints, so
+     * "no support" (200, false: readable store, no advertised AKP key
+     * or runtime-unavailable probe) stays distinguishable. */
     tki = read_keys(jwkdir);
-    if (tki)
-        has_pqc = tki->m_has_pqc && pqc_is_available();
+    if (!tki || tki->m_keys_count == 0)
+        return http_reply(HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL);
+
+    has_pqc = tki->m_has_pqc && pqc_is_available();
 
     json_auto_t *ver = json_pack("{s:s, s:{s:b, s:b}}",
                                  "tang_version", VERSION,

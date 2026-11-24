@@ -1195,9 +1195,11 @@ test_validate_request_protected(void)
 
 /* /rec-kem must not bind to an ECMR key that /rec would reject: a
  * public-only key, a key whose "d" is present but empty, a key whose
- * key_ops exclude deriveKey, and an unrestricted key (no
- * use/key_ops), which jose permits for deriveKey only when
- * req = false. */
+ * key_ops exclude deriveKey, an unrestricted key (no use/key_ops),
+ * which jose permits for deriveKey only when req = false, and a key
+ * with its alg removed, which the permission checks alone would
+ * admit. All the shapes share the one predicate
+ * jwk_valid_for_ecmr_recovery() with advertising and healing. */
 static void
 test_validate_request_protected_ecmr_key_types(void)
 {
@@ -1242,6 +1244,15 @@ test_validate_request_protected_ecmr_key_types(void)
         dump_jwk_to_dir(unrestricted, tmpdir);
     ASSERT(unrestricted_thp);
 
+    /* Alg removed: the material and permission checks alone would
+     * admit it, but no recovery endpoint accepts an alg-less key. */
+    json_auto_t *no_alg = json_pack("{s:s}", "alg", "ECMR");
+    ASSERT(no_alg && jose_jwk_gen(NULL, no_alg));
+    json_object_del(no_alg, "alg");
+    __attribute__((cleanup(str_cleanup))) char *no_alg_thp =
+        dump_jwk_to_dir(no_alg, tmpdir);
+    ASSERT(no_alg_thp);
+
     /* Non-EC key claiming the ECMR algorithm. */
     json_auto_t *not_ec = json_pack("{s:s, s:s}", "kty", "RSA",
                                     "alg", "RS256");
@@ -1260,7 +1271,8 @@ test_validate_request_protected_ecmr_key_types(void)
     const char *kem_kid = "test-kem-kid";
     const char *suite = "ECMR+ML-KEM-768";
     const char *bad_kids[] = {pub_thp, empty_d_thp, no_derive_thp,
-                              unrestricted_thp, not_ec_thp, NULL};
+                              unrestricted_thp, no_alg_thp, not_ec_thp,
+                              NULL};
     for (int i = 0; bad_kids[i]; i++) {
         __attribute__((cleanup(str_cleanup))) char *h =
             build_header_json(DIR_REQUEST, KEM_VERSION, suite, bad_kids[i],

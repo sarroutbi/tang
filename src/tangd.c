@@ -119,7 +119,6 @@ rec(http_method_t method, const char *path, const char *body,
     json_auto_t *rep = NULL;
     const char *alg = NULL;
     const char *kty = NULL;
-    const char *d = NULL;
 
     /*
      * Parse and validate the request JWK
@@ -157,13 +156,11 @@ rec(http_method_t method, const char *path, const char *body,
     if (!jwk)
         return http_reply(HTTP_STATUS_NOT_FOUND, NULL);
 
-    if (!jose_jwk_prm(NULL, jwk, true, "deriveKey"))
-        return http_reply(HTTP_STATUS_FORBIDDEN, NULL);
-
-    if (json_unpack(jwk, "{s:s,s?s}", "d", &d, "alg", &alg) < 0)
-        return http_reply(HTTP_STATUS_FORBIDDEN, NULL);
-
-    if (alg && strcmp(alg, "ECMR") != 0)
+    /* The same predicate advertising, healing and /rec-kem use, so a
+     * key is recoverable here exactly when it could have been
+     * advertised: kty EC, alg ECMR, deriveKey (req = true) and
+     * non-empty private material. */
+    if (!jwk_valid_for_ecmr_recovery(jwk))
         return http_reply(HTTP_STATUS_FORBIDDEN, NULL);
 
     /*

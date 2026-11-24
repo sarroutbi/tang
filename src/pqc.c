@@ -361,28 +361,12 @@ validate_request_protected(const json_t *blob_jwe,
     if (!ecmr_key)
         return 0;
 
-    const char *ecmr_alg = json_string_value(
-        json_object_get(ecmr_key, "alg"));
-    if (!ecmr_alg || strcmp(ecmr_alg, ECMR_ALG) != 0)
-        return 0;
-
-    /* Match the key validation rec() applies to its server-side JWK:
-     * "kty": "EC", the deriveKey permission (req = true) and private
-     * key material, so /rec-kem cannot bind to a public-only or
-     * malformed key that /rec would reject: the binding carries the
-     * ECMR kid for classical recovery too. */
-    const char *ecmr_kty = json_string_value(
-        json_object_get(ecmr_key, "kty"));
-    if (!ecmr_kty || strcmp(ecmr_kty, "EC") != 0)
-        return 0;
-
-    if (!jose_jwk_prm(NULL, ecmr_key, true, "deriveKey"))
-        return 0;
-
-    /* An empty "d" is no private material either. json_string_length()
-     * is 0 for a missing member or a non-string, so one check covers
-     * all three -- the same non-empty rule the KEM side enforces. */
-    if (!json_string_length(json_object_get(ecmr_key, "d")))
+    /* The ECMR key must satisfy the one predicate every side of the
+     * ECMR handling shares -- kty EC, alg ECMR, deriveKey (req =
+     * true) and non-empty private material -- so /rec-kem accepts
+     * exactly the keys /rec accepts and advertising admits: the
+     * binding carries the ECMR kid for classical recovery too. */
+    if (!jwk_valid_for_ecmr_recovery(ecmr_key))
         return 0;
 
     *out_ecmr_kid = strdup(kid);

@@ -251,20 +251,36 @@ jwk_has_private_material(const json_t* jwk)
     return json_is_string(d) && json_string_length(d) > 0;
 }
 
-/* /rec recovers with jose_jwk_prm(..., req = true) and the private
- * half of the key, so a deriving key must pass the same predicate and
- * carry private material to be advertised: without the material
+/* True for the one shape of key ECMR recovery can be served with:
+ * kty EC, alg ECMR, the deriveKey permission (req = true) and
+ * non-empty private material. Advertising, the healing trigger and
+ * both recovery endpoints (/rec and /rec-kem) share this predicate,
+ * so a key is only advertised when recovery would accept it. Without
+ * the alg and kty checks, a hand-edited key with its alg removed
+ * would be advertised and bound to, and every later /rec-kem could
+ * only fail with the protocol-mismatch message; without the material
  * check, a public-only ECMR key restored into the key directory
  * (e.g. the output of "jose jwk pub", which preserves key_ops) would
  * be admitted on key_ops alone -- clients would bind to it, since
  * encapsulation only needs crv/x/y, and every later recovery could
  * only fail with 403. */
-static int
-jwk_valid_for_deriving_exchange(const json_t* jwk)
+int
+jwk_valid_for_ecmr_recovery(const json_t* jwk)
 {
     if (!jwk) {
         return 0;
     }
+
+    const char* kty = json_string_value(json_object_get(jwk, "kty"));
+    if (!kty || strcmp(kty, "EC") != 0) {
+        return 0;
+    }
+
+    const char* alg = json_string_value(json_object_get(jwk, "alg"));
+    if (!alg || strcmp(alg, "ECMR") != 0) {
+        return 0;
+    }
+
     return jwk_has_private_material(jwk)
         && jose_jwk_prm(NULL, jwk, true, "deriveKey");
 }
@@ -411,7 +427,7 @@ prepare_payload_and_sign(struct tang_keys_info* tki)
             if (json_array_append(tki->m_payload, jwk) == -1) {
                 continue;
             }
-        } else if (jwk_valid_for_deriving_exchange(jwk)) {
+        } else if (jwk_valid_for_ecmr_recovery(jwk)) {
             if (json_array_append(tki->m_payload, jwk) == -1) {
                 continue;
             }
@@ -582,12 +598,13 @@ load_keys(const char* jwkdir)
     return tki;
 }
 
-/* True when the key store holds no deriving key that could actually
- * participate in a recovery, active or rotated: a store left
- * partially populated (e.g. by an interrupted auto-generation, or by
- * a public-only ECMR key restored into it) can hold signing keys but
- * no usable deriving key, so the advertisement it produces looks
- * healthy while no client could ever recover with it. */
+/* True when the key store holds no ECMR recovery key, active or
+ * rotated: the shared jwk_valid_for_ecmr_recovery() predicate
+ * decides, so a store left partially populated (e.g. by an
+ * interrupted auto-generation, or by a public-only or hand-edited
+ * ECMR key restored into it) can hold signing keys but no key
+ * recovery would accept, and the advertisement it produces would
+ * look healthy while no client could ever recover with it. */
 static int
 store_lacks_deriving_keys(const struct tang_keys_info* tki)
 {
@@ -595,12 +612,12 @@ store_lacks_deriving_keys(const struct tang_keys_info* tki)
     json_t* jwk;
 
     json_array_foreach(tki->m_keys, idx, jwk) {
-        if (jwk_valid_for_deriving_exchange(jwk)) {
+        if (jwk_valid_for_ecmr_recovery(jwk)) {
             return 0;
         }
     }
     json_array_foreach(tki->m_rotated_keys, idx, jwk) {
-        if (jwk_valid_for_deriving_exchange(jwk)) {
+        if (jwk_valid_for_ecmr_recovery(jwk)) {
             return 0;
         }
     }

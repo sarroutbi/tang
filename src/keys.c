@@ -206,9 +206,11 @@ jwk_valid_for_signing_and_verifying(const json_t* jwk)
     return ret;
 }
 
-/* True for JWKs permitted to sign. Exported for the KEM advertisement
- * path, which admits retained (rotated) signers with the same
- * predicate find_jws() uses for the signer requested by thumbprint. */
+/* True for JWKs permitted to sign, the same predicate find_jws()
+ * uses for the signer requested by thumbprint. Exported for the unit
+ * tests; the KEM advertisement path no longer uses it, and admits
+ * retained signers only when jose_jws_sig can actually sign with
+ * them (see jwk_usable_as_retained_signer in pqc.c). */
 int
 jwk_valid_for_signing(const json_t* jwk)
 {

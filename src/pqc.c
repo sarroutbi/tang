@@ -744,15 +744,21 @@ adv_kem(http_method_t method, const char *path, const char *body,
 }
 
 /* A retained (rotated) key may co-sign the KEM advertisement only
- * when it can actually sign: kty AKP is skipped entirely, like
- * prepare_payload_and_sign() diverts it (RFC 9864 AKP also covers
- * signature algorithms, so a key_ops check cannot tell a KEM key from
- * a signer, and jose_jws_sig cannot infer a signature algorithm for
- * an AKP key at all), and a key without private material cannot sign
- * either -- the same shape as jwk_has_complete_kem_material on the
- * KEM side. jose_jws_sig is all-or-nothing over the key array: one
- * unusable retained key would make jwk_sign() fail and take down
- * every /adv-kem/<thp> with a 404 while /adv stays healthy. */
+ * when it can produce a signature on its own: jose_jws_sig is
+ * all-or-nothing over the key array, so one unusable retained key
+ * would make jwk_sign() fail and take down every /adv-kem/<thp>
+ * with a 404 while /adv stays healthy. kty AKP is skipped entirely,
+ * like prepare_payload_and_sign() diverts it: RFC 9864 AKP also
+ * covers signature algorithms (e.g. ML-DSA), so a jose that supports
+ * them could sign with an AKP key, but tang treats AKP keys as
+ * hybrid exchange keys only, never as classical signers. Every other
+ * class of unusable key is caught in one place by signing a
+ * throwaway JWS with the key alone: jose_jws_sig itself refuses keys
+ * that are not permitted to sign, that carry no private material, or
+ * for which no signature algorithm can be inferred. The last class
+ * is the one a permission check alone misses: an ECMR key with
+ * key_ops deleted is unrestricted, so it passes jwk_valid_for_signing(),
+ * yet jose cannot sign with it under any algorithm. */
 static int
 jwk_usable_as_retained_signer(const json_t *jwk)
 {
@@ -760,11 +766,23 @@ jwk_usable_as_retained_signer(const json_t *jwk)
     if (!kty || strcmp(kty, "AKP") == 0)
         return 0;
 
-    if (!jwk_valid_for_signing(jwk))
+    json_auto_t *signers = json_array();
+    json_auto_t *probe = json_pack("{s:s}", "payload", "");
+    if (!signers || !probe || json_array_append(signers, (json_t *)jwk) < 0)
         return 0;
+    return jose_jws_sig(NULL, probe, NULL, signers);
+}
 
-    const json_t *d = json_object_get(jwk, "d");
-    return json_is_string(d) && json_string_length(d) > 0;
+/* A retained key dropped from the signer set is invisible in the
+ * advertisement: bindings frozen while it was active stop verifying,
+ * so say why in the log instead of dropping it silently. */
+static void
+log_skipped_retained_signer(const json_t *jwk)
+{
+    json_auto_t *thp = jose_jwk_thp(NULL, jwk, "S256");
+    fprintf(stderr, "Skipping retained key %s: it cannot produce a "
+            "signature, keeping /adv-kem available\n",
+            thp ? json_string_value(thp) : "(no thumbprint)");
 }
 
 static json_t*
@@ -819,8 +837,10 @@ find_jws_kem_by_thp(struct tang_keys_info *keys_info, const char *thumbprint)
     size_t idx;
     json_t *jwk;
     json_array_foreach(keys_info->m_rotated_keys, idx, jwk) {
-        if (!jwk_usable_as_retained_signer(jwk))
+        if (!jwk_usable_as_retained_signer(jwk)) {
+            log_skipped_retained_signer(jwk);
             continue;
+        }
         if (json_array_append(sign, jwk) < 0)
             return NULL;
     }

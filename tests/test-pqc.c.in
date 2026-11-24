@@ -494,9 +494,13 @@ test_find_jws_kem_by_thp_rotated_signer(void)
  * advertisement down: jose_jws_sig is all-or-nothing over the signer
  * array, so a hidden unrestricted AKP key (which the permission check
  * alone would admit, and for which no signature algorithm can be
- * inferred) or a hidden pub-only signing key would make jwk_sign()
- * fail and turn every /adv-kem/<thp> into a 404 while /adv stays
- * healthy. */
+ * inferred), a hidden pub-only signing key, or a hidden ECMR key with
+ * key_ops deleted (unrestricted, but no signature algorithm can be
+ * inferred for alg ECMR) would make jwk_sign() fail and turn every
+ * /adv-kem/<thp> into a 404 while /adv stays healthy. An unrestricted
+ * ES512 key, in contrast, is a signer jose can use, so it must stay
+ * in the signing set: dropping every unrestricted key would break the
+ * bindings of clients that bound while it was active. */
 static void
 test_find_jws_kem_by_thp_unusable_retained_keys(void)
 {
@@ -536,6 +540,34 @@ test_find_jws_kem_by_thp_unusable_retained_keys(void)
              tmpdir, pub_only_thp);
     ASSERT(json_dump_file(pub_only, pub_only_path, JSON_COMPACT) == 0);
 
+    /* A hidden ECMR key with key_ops deleted: unrestricted, so the
+     * permission check alone would admit it as a "signer", but jose
+     * cannot infer a signature algorithm for alg ECMR. */
+    json_auto_t *rogue_ecmr = json_pack("{s:s}", "alg", "ECMR");
+    ASSERT(rogue_ecmr && jose_jwk_gen(NULL, rogue_ecmr));
+    json_object_del(rogue_ecmr, "key_ops");
+    __attribute__((cleanup(str_cleanup))) char *rogue_ecmr_thp =
+        jwk_thumbprint(rogue_ecmr, "S256");
+    ASSERT(rogue_ecmr_thp);
+    char rogue_ecmr_path[PATH_MAX];
+    snprintf(rogue_ecmr_path, sizeof(rogue_ecmr_path), "%s/.%s.jwk",
+             tmpdir, rogue_ecmr_thp);
+    ASSERT(json_dump_file(rogue_ecmr, rogue_ecmr_path, JSON_COMPACT) == 0);
+
+    /* A hidden unrestricted ES512 key: jose can sign with it, so it
+     * must be admitted -- this pins that the filter drops keys that
+     * cannot sign, not keys that merely lack key_ops. */
+    json_auto_t *unrestricted = json_pack("{s:s}", "alg", "ES512");
+    ASSERT(unrestricted && jose_jwk_gen(NULL, unrestricted));
+    json_object_del(unrestricted, "key_ops");
+    __attribute__((cleanup(str_cleanup))) char *unrestricted_thp =
+        jwk_thumbprint(unrestricted, "S256");
+    ASSERT(unrestricted_thp);
+    char unrestricted_path[PATH_MAX];
+    snprintf(unrestricted_path, sizeof(unrestricted_path), "%s/.%s.jwk",
+             tmpdir, unrestricted_thp);
+    ASSERT(json_dump_file(unrestricted, unrestricted_path, JSON_COMPACT) == 0);
+
     __attribute__((cleanup(cleanup_tang_keys_info)))
         struct tang_keys_info *keys_info = read_keys(tmpdir);
     ASSERT(keys_info);
@@ -546,8 +578,10 @@ test_find_jws_kem_by_thp_unusable_retained_keys(void)
         return;
     }
 
-    /* Both hidden keys must have been loaded as retained. */
-    ASSERT(json_array_size(keys_info->m_rotated_keys) >= 3);
+    /* All the rogue hidden keys must have been loaded as retained:
+     * the two fixture rotated keys, the AKP, pub-only and ECMR
+     * rogues, and the unrestricted signer. */
+    ASSERT(json_array_size(keys_info->m_rotated_keys) >= 6);
 
     json_t *kem_key = json_array_get(keys_info->m_kem_payload, 0);
     ASSERT(kem_key);
@@ -566,6 +600,17 @@ test_find_jws_kem_by_thp_unusable_retained_keys(void)
     ASSERT(current_pub);
     ASSERT(jose_jwk_pub(NULL, current_pub));
     ASSERT(jose_jws_ver(NULL, signed_keys, NULL, current_pub, 1));
+
+    /* The unrestricted ES512 key was kept in the signing set: the
+     * advertisement verifies with its public half, exactly as a
+     * client that bound while it was active would check it. */
+    json_auto_t *unrestricted_pub = json_deep_copy(unrestricted);
+    ASSERT(unrestricted_pub);
+    ASSERT(jose_jwk_pub(NULL, unrestricted_pub));
+    ASSERT_WITH_MSG(jose_jws_ver(NULL, signed_keys, NULL,
+                                 unrestricted_pub, 1),
+                    "an unrestricted signer jose can use was dropped "
+                    "from the KEM advertisement");
 
     remove_tempdir(tmpdir);
 }

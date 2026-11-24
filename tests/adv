@@ -103,29 +103,37 @@ adv_kem_test () {
         "http://127.0.0.1:${PORT}${prefix}/adv-kem?alg=ML;KEM")
     [ "$code" = "400" ]
 
-    # /adv-kem/<thumbprint> lookup by kid
+    # /adv-kem/<thumbprint> lookup by kid. The loop reads from a file
+    # instead of a pipe: a piped "while read" runs in a subshell where,
+    # on POSIX-strict shells (dash, the BSD sh), a failed assertion is
+    # only surfaced when it is the last command of the last iteration
+    # -- and jose alg -k hash lists S512 last, so a server serving the
+    # correct key only for S512 lookups would pass green.
     for alg in $supported_algs; do
         kem_filtered=$(fetch "${prefix}/adv-kem?alg=${alg}")
-        printf '%s' "$kem_filtered" | jose fmt -j- -Og payload -SyOg keys -f- \
-            | while read -r jwk; do
-                for hash_alg in $(jose alg -k hash); do
-                    thp=$(printf '%s' "$jwk" | jose jwk thp -a "$hash_alg" -i-)
-                    kem_by_thp=$(fetch "${prefix}/adv-kem/${thp}")
-                    printf '%s' "$kem_by_thp" | ver $TMP/db/sig.jwk
-                    # The pin contract: the key served by thumbprint X
-                    # is the key whose thumbprint is X. In
-                    # no-stored-adv mode this is the only thing that
-                    # authenticates the fetch: the client checks it
-                    # against the kem_kid pinned in its binding, while
-                    # the JWS verify keys come from the same channel
-                    # and carry no trust there.
-                    pinned_thp=$(printf '%s' "$kem_by_thp" \
-                        | jose fmt -j- -Og payload -SyOg keys -A -g 0 -o- \
-                        | jose jwk thp -a "$hash_alg" -i-)
-                    [ "$pinned_thp" = "$thp" ]
-                done
+        payload_keys="${TMP}/adv-kem-payload.keys"
+        printf '%s' "$kem_filtered" \
+            | jose fmt -j- -Og payload -SyOg keys -f- > "${payload_keys}"
+        pin_failed=0
+        while read -r jwk; do
+            for hash_alg in $(jose alg -k hash); do
+                thp=$(printf '%s' "$jwk" | jose jwk thp -a "$hash_alg" -i-)
+                kem_by_thp=$(fetch "${prefix}/adv-kem/${thp}")
+                printf '%s' "$kem_by_thp" | ver $TMP/db/sig.jwk
+                # The pin contract: the key served by thumbprint X
+                # is the key whose thumbprint is X. In
+                # no-stored-adv mode this is the only thing that
+                # authenticates the fetch: the client checks it
+                # against the kem_kid pinned in its binding, while
+                # the JWS verify keys come from the same channel
+                # and carry no trust there.
+                pinned_thp=$(printf '%s' "$kem_by_thp" \
+                    | jose fmt -j- -Og payload -SyOg keys -A -g 0 -o- \
+                    | jose jwk thp -a "$hash_alg" -i-)
+                [ "$pinned_thp" = "$thp" ] || pin_failed=1
             done
-        [ $? -eq 0 ]
+        done < "${payload_keys}"
+        [ "${pin_failed}" -eq 0 ]
     done
 
     # /adv-kem/<thumbprint> with non-KEM key thumbprint must return 404
@@ -193,16 +201,21 @@ adv_second_phase () {
     # A public-only ECMR key (e.g. the output of "jose jwk pub", which
     # preserves key_ops) must not be advertised: clients would bind to
     # it, since encapsulation only needs crv/x/y, but every later
-    # recovery needs the private half and could only fail.
+    # recovery needs the private half and could only fail. The loop
+    # reads from a file, not a pipe, so its assertion is not swallowed
+    # by the subshell a piped "while read" runs in.
     jose jwk gen -i '{"alg":"ECMR"}' | jose jwk pub -i- \
         > $TMP/db/pubonly-exc.jwk
     pubonly_exc_thp=$(jose jwk thp -i $TMP/db/pubonly-exc.jwk)
-    fetch "${ENDPOINT}"/adv | jose fmt -j- -Og payload -SyOg keys -f- \
-        | while read -r jwk; do
-              thp=$(printf '%s' "$jwk" | jose jwk thp -i-)
-              [ "$thp" != "$pubonly_exc_thp" ]
-          done
-    [ $? -eq 0 ]
+    adv_payload_keys="${TMP}/adv-payload.keys"
+    fetch "${ENDPOINT}"/adv \
+        | jose fmt -j- -Og payload -SyOg keys -f- > "${adv_payload_keys}"
+    pubonly_leaked=0
+    while read -r jwk; do
+        thp=$(printf '%s' "$jwk" | jose jwk thp -i-)
+        [ "$thp" != "$pubonly_exc_thp" ] || pubonly_leaked=1
+    done < "${adv_payload_keys}"
+    [ "${pubonly_leaked}" -eq 0 ]
     rm -f $TMP/db/pubonly-exc.jwk
 
     # The default advertisement fetch should succeed and pass verification

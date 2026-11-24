@@ -24,17 +24,25 @@
  * forced with pre-created files. keys.c's json_dump_file calls are
  * rewritten to this wrapper (the same macro-stub pattern test-pqc.c.in
  * uses for http_reply); the wrapper still performs the real saves
- * until the injected failure point. */
+ * until the injected failure point. With json_dump_fail_saved set,
+ * the failing call performs its real save too: it simulates a
+ * close-time failure after the last write, which leaves a complete,
+ * valid key on disk that json_dump_file() nonetheless reports as
+ * failed. */
 static int json_dump_fail_after = -1;
 static int json_dump_calls = 0;
+static int json_dump_fail_saved = 0;
 
 static int
 test_json_dump_file(const json_t* jwk, const char* path, size_t flags)
 {
-    if (json_dump_fail_after >= 0 && json_dump_calls++ >= json_dump_fail_after) {
+    int fail = json_dump_fail_after >= 0
+        && json_dump_calls++ >= json_dump_fail_after;
+    if (fail && !json_dump_fail_saved) {
         return -1;
     }
-    return json_dump_file(jwk, path, flags);
+    int ret = json_dump_file(jwk, path, flags);
+    return fail ? -1 : ret;
 }
 
 #define json_dump_file test_json_dump_file
@@ -160,6 +168,27 @@ test_create_new_keys_save_failure(void)
     remove_tempdir(tmpdir);
 }
 
+/* Number of entries in @dirpath besides "." and "..", or -1 when it
+ * cannot be opened. */
+static int
+count_dir_files(const char* dirpath)
+{
+    DIR* dir = opendir(dirpath);
+    if (!dir) {
+        return -1;
+    }
+    int files = 0;
+    struct dirent* d;
+    while ((d = readdir(dir)) != NULL) {
+        if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0) {
+            continue;
+        }
+        files++;
+    }
+    closedir(dir);
+    return files;
+}
+
 /* The rollback must remove the keys written before a later one fails:
  * a partial key set left behind would look like a populated keydir to
  * the regeneration trigger and wedge the store. The save failure is
@@ -184,17 +213,49 @@ test_create_new_keys_rollback(void)
                     "create_new_keys must restore the umask on failure");
 
     /* Nothing was left behind. */
-    DIR* dir = opendir(newdir);
-    ASSERT(dir);
-    int files = 0;
-    struct dirent* d;
-    while ((d = readdir(dir)) != NULL) {
-        if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0) {
-            continue;
-        }
-        files++;
-    }
-    closedir(dir);
+    int files = count_dir_files(newdir);
+    ASSERT_WITH_MSG(files == 0, "rollback left %d file(s) behind", files);
+
+    /* The empty keydir means the next read_keys retries the
+     * generation instead of wedging. */
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
+        read_keys(newdir);
+    ASSERT(tki);
+    ASSERT(tki->m_keys_count >= 2);
+
+    remove_tempdir(newdir);
+}
+
+/* A close-time failure after the last write leaves a complete, valid
+ * key on disk that json_dump_file() nonetheless reports as failed:
+ * the rollback must unlink that one too. With the path recorded only
+ * after a successful dump, the key would stay behind unrecorded --
+ * an ECMR key left alone would keep the healing trigger quiet (the
+ * store "has" a deriving key) while no signer exists, and every
+ * request would answer 500. */
+static void
+test_create_new_keys_rollback_complete_file(void)
+{
+    __attribute__((cleanup(cleanup_str))) char* newdir = create_tempdir();
+    ASSERT(newdir);
+
+    mode_t old_umask = umask(0022);
+    /* Fail on the second save (ECMR), performing the real save
+     * first: the file is complete on disk when the failure is
+     * reported. */
+    json_dump_calls = 0;
+    json_dump_fail_after = 1;
+    json_dump_fail_saved = 1;
+    int ret = create_new_keys(newdir);
+    json_dump_fail_after = -1;
+    json_dump_fail_saved = 0;
+    ASSERT(ret == 0);
+    ASSERT_WITH_MSG(umask(old_umask) == old_umask,
+                    "create_new_keys must restore the umask on failure");
+
+    /* Nothing was left behind, the complete-but-failed key
+     * included. */
+    int files = count_dir_files(newdir);
     ASSERT_WITH_MSG(files == 0, "rollback left %d file(s) behind", files);
 
     /* The empty keydir means the next read_keys retries the
@@ -1234,6 +1295,7 @@ run_tests(void)
     test_is_valid_kem_alg();
     test_create_new_keys_save_failure();
     test_create_new_keys_rollback();
+    test_create_new_keys_rollback_complete_file();
 }
 
 int main(int argc, char** argv)

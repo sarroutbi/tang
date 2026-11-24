@@ -452,11 +452,11 @@ create_new_keys(const char* jwkdir)
     specs[n] = (struct key_spec){NULL, 0};
     char path[PATH_MAX];
 
-    /* Keys written so far, removed again when a later key fails: a
-     * partial auto-generated key set must not be left behind, or the
-     * non-empty keydir would never trigger a regeneration and the
-     * server would stay wedged until the partial keys are removed by
-     * hand. */
+    /* Key paths, recorded as soon as writing them is attempted and
+     * removed again when a later key fails: a partial auto-generated
+     * key set must not be left behind, or the non-empty keydir would
+     * never trigger a regeneration and the server would stay wedged
+     * until the partial keys are removed by hand. */
     char written[ARRAY_SIZE(specs)][PATH_MAX];
     size_t nwritten = 0;
 
@@ -484,6 +484,18 @@ create_new_keys(const char* jwkdir)
             break;
         }
         path[sizeof(path) - 1] = '\0';
+        /* Recorded before the dump and the chmod: json_dump_file()
+         * creates the path before it can fail, so recording only
+         * after a successful dump would leave an unrecorded file
+         * behind on a write or close error. A truncated one is
+         * harmless -- load_keys() skips files that do not parse --
+         * but a close-time failure after the last write leaves a
+         * complete key, and an ECMR key alone would keep the healing
+         * trigger quiet while no signer exists, wedging the store on
+         * 500s. Unlinking a path that was never created is
+         * harmless. */
+        snprintf(written[nwritten], PATH_MAX, "%s", path);
+        nwritten++;
         /* JSON_COMPACT matches the format the jose CLI writes, so the
          * key files are byte-identical no matter which path created
          * them (tangd auto-generation, tangd-keygen or an operator
@@ -493,11 +505,6 @@ create_new_keys(const char* jwkdir)
             result = 0;
             break;
         }
-        /* Recorded before the chmod: a file whose chmod fails must be
-         * unlinked by the rollback too, or it stays behind as a
-         * partial key set. */
-        snprintf(written[nwritten], PATH_MAX, "%s", path);
-        nwritten++;
         /* Set 0440 permission for the new key. */
         if (chmod(path, S_IRUSR | S_IRGRP) == -1) {
             fprintf(stderr, "Unable to set permissions for JWK file (%s)\n", path);

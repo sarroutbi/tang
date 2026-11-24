@@ -217,6 +217,30 @@ jwk_valid_for_signing(const json_t* jwk)
     return jwk_valid_for(jwk, "sign");
 }
 
+/* True when a signature can actually be produced with this key
+ * alone, probed by signing a throwaway JWS: jose_jws_sig refuses
+ * keys that are not permitted to sign, that carry no private
+ * material, or for which no signature algorithm can be inferred.
+ * The permission predicates above cannot replace it, because
+ * jose_jwk_prm() only inspects use/key_ops: a hand-edited
+ * public-only key that kept its key_ops passes them -- unlike the
+ * output of "jose jwk pub", which drops the sign operation -- while
+ * nothing can ever sign with it. */
+int
+jwk_can_produce_signature(const json_t* jwk)
+{
+    if (!jwk) {
+        return 0;
+    }
+
+    json_auto_t* signers = json_array();
+    json_auto_t* probe = json_pack("{s:s}", "payload", "");
+    if (!signers || !probe || json_array_append(signers, (json_t*)jwk) < 0) {
+        return 0;
+    }
+    return jose_jws_sig(NULL, probe, NULL, signers);
+}
+
 /* True for JWKs carrying private material: an exchange key without
  * it can still be advertised and bound to -- encapsulation only
  * needs the public members -- but recovery can never succeed. */
@@ -371,7 +395,16 @@ prepare_payload_and_sign(struct tang_keys_info* tki)
             continue;
         }
 
-        if (jwk_valid_for_signing_and_verifying(jwk)) {
+        /* A signer must also be able to produce a signature, not
+         * only be permitted to: jose_jws_sig is all-or-nothing over
+         * m_sign, so a hand-edited public-only key that kept its
+         * key_ops would take /adv and /adv-kem down with a 404 while
+         * /version keeps answering 200. With the probe, a store left
+         * without any usable signer fails read_keys() and every
+         * endpoint -- /version included -- answers 500: the
+         * broken-store signal, not a silent half-healthy server. */
+        if (jwk_valid_for_signing_and_verifying(jwk)
+                && jwk_can_produce_signature(jwk)) {
             if (json_array_append(tki->m_sign, jwk) == -1) {
                 continue;
             }

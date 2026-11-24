@@ -752,13 +752,12 @@ adv_kem(http_method_t method, const char *path, const char *body,
  * covers signature algorithms (e.g. ML-DSA), so a jose that supports
  * them could sign with an AKP key, but tang treats AKP keys as
  * hybrid exchange keys only, never as classical signers. Every other
- * class of unusable key is caught in one place by signing a
- * throwaway JWS with the key alone: jose_jws_sig itself refuses keys
- * that are not permitted to sign, that carry no private material, or
- * for which no signature algorithm can be inferred. The last class
- * is the one a permission check alone misses: an ECMR key with
- * key_ops deleted is unrestricted, so it passes jwk_valid_for_signing(),
- * yet jose cannot sign with it under any algorithm. */
+ * class of unusable key -- not permitted to sign, no private
+ * material, or no inferable signature algorithm, e.g. an ECMR key
+ * with key_ops deleted, which passes the permission check because
+ * unrestricted keys are admitted -- is caught by the shared probe
+ * jwk_can_produce_signature(), the same one the active signer set
+ * is admitted with. */
 static int
 jwk_usable_as_retained_signer(const json_t *jwk)
 {
@@ -766,11 +765,7 @@ jwk_usable_as_retained_signer(const json_t *jwk)
     if (!kty || strcmp(kty, "AKP") == 0)
         return 0;
 
-    json_auto_t *signers = json_array();
-    json_auto_t *probe = json_pack("{s:s}", "payload", "");
-    if (!signers || !probe || json_array_append(signers, (json_t *)jwk) < 0)
-        return 0;
-    return jose_jws_sig(NULL, probe, NULL, signers);
+    return jwk_can_produce_signature(jwk);
 }
 
 /* A retained key dropped from the signer set is invisible in the

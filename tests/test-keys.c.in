@@ -1088,6 +1088,106 @@ test_read_keys_no_signing_keys(void)
     umask(old_umask);
 }
 
+/* A hand-edited public-only signing key -- "d" removed, key_ops
+ * kept, so unlike the output of "jose jwk pub" it still passes the
+ * permission checks -- must not be admitted as the active signer:
+ * nothing can produce a signature with it. With a complete deriving
+ * key in the store the healing trigger stays quiet, so read_keys()
+ * fails and every endpoint, /version included, answers 500 -- the
+ * broken-store signal -- instead of /adv and /adv-kem answering 404
+ * while /version keeps saying 200. */
+static void
+test_read_keys_public_only_signer_fails(void)
+{
+    mode_t old_umask = umask(0022);
+    __attribute__((cleanup(cleanup_str))) char* newdir = create_tempdir();
+    ASSERT(newdir);
+
+    json_auto_t* pub_only = jwk_generate("ES512");
+    ASSERT(pub_only);
+    json_object_del(pub_only, "d");
+    char pub_only_path[PATH_MAX];
+    snprintf(pub_only_path, PATH_MAX, "%s/pubonly.jwk", newdir);
+    ASSERT(json_dump_file(pub_only, pub_only_path, 0) == 0);
+
+    /* A complete deriving key keeps the healing trigger quiet, so
+     * the failure can only come from the missing usable signer. */
+    json_auto_t* exc = jwk_generate("ECMR");
+    ASSERT(exc);
+    char exc_path[PATH_MAX];
+    snprintf(exc_path, PATH_MAX, "%s/exc.jwk", newdir);
+    ASSERT(json_dump_file(exc, exc_path, 0) == 0);
+
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
+        read_keys(newdir);
+    ASSERT_WITH_MSG(tki == NULL,
+                    "a store whose only signer cannot sign must fail "
+                    "read_keys");
+
+    remove_tempdir(newdir);
+    umask(old_umask);
+}
+
+/* The same public-only signer next to a complete one: the store
+ * keeps serving, and the unusable key is neither used for signing
+ * nor advertised -- jose_jws_sig is all-or-nothing over m_sign, so
+ * admitting it would take /adv and /adv-kem down with it. */
+static void
+test_read_keys_public_only_signer_ignored(void)
+{
+    mode_t old_umask = umask(0022);
+    __attribute__((cleanup(cleanup_str))) char* newdir = create_tempdir();
+    ASSERT(newdir);
+
+    json_auto_t* sig = jwk_generate("ES512");
+    ASSERT(sig);
+    char sig_path[PATH_MAX];
+    snprintf(sig_path, PATH_MAX, "%s/sig.jwk", newdir);
+    ASSERT(json_dump_file(sig, sig_path, 0) == 0);
+
+    json_auto_t* pub_only = jwk_generate("ES512");
+    ASSERT(pub_only);
+    json_object_del(pub_only, "d");
+    __attribute__((cleanup(cleanup_str))) char* pub_only_thp =
+        jwk_thumbprint(pub_only, "S256");
+    ASSERT(pub_only_thp);
+    char pub_only_path[PATH_MAX];
+    snprintf(pub_only_path, PATH_MAX, "%s/pubonly.jwk", newdir);
+    ASSERT(json_dump_file(pub_only, pub_only_path, 0) == 0);
+
+    json_auto_t* exc = jwk_generate("ECMR");
+    ASSERT(exc);
+    char exc_path[PATH_MAX];
+    snprintf(exc_path, PATH_MAX, "%s/exc.jwk", newdir);
+    ASSERT(json_dump_file(exc, exc_path, 0) == 0);
+
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
+        read_keys(newdir);
+    ASSERT_WITH_MSG(tki, "a usable signer must keep the store alive");
+    ASSERT(tki->m_keys_count == 3);
+    ASSERT_WITH_MSG(json_array_size(tki->m_sign) == 1,
+                    "the public-only key must not be in the signing set");
+
+    /* Not advertised either: a client pinning it as a verify key
+     * could never verify an advertisement again. */
+    size_t idx;
+    json_t* jwk;
+    json_array_foreach(tki->m_payload, idx, jwk) {
+        __attribute__((cleanup(cleanup_str))) char* thp =
+            jwk_thumbprint(jwk, "S256");
+        ASSERT_WITH_MSG(thp && strcmp(thp, pub_only_thp) != 0,
+                        "public-only signing key advertised in the payload");
+    }
+
+    /* The default advertisement is produced and verifies. */
+    json_auto_t* adv = find_jws(tki, NULL);
+    ASSERT_WITH_MSG(adv, "an unusable active signer took down /adv");
+    ASSERT(jose_jws_ver(NULL, adv, NULL, tki->m_sign, 1));
+
+    remove_tempdir(newdir);
+    umask(old_umask);
+}
+
 static void
 test_find_by_thp_null(void)
 {
@@ -1129,6 +1229,8 @@ run_tests(void)
     test_read_keys_public_only_exc_not_advertised();
     test_read_keys_public_only_exc_heals();
     test_read_keys_no_signing_keys();
+    test_read_keys_public_only_signer_fails();
+    test_read_keys_public_only_signer_ignored();
     test_is_valid_kem_alg();
     test_create_new_keys_save_failure();
     test_create_new_keys_rollback();

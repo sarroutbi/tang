@@ -52,3 +52,4 @@ json_t* find_jws(struct tang_keys_info* /* tki */, const char* /* thp */);
 json_t* find_jwk(struct tang_keys_info* /* tki */, const char* /* thp */);
 int jwk_valid_for_kem_exchange(const json_t* /* jwk */);
 int jwk_valid_for_signing(const json_t* /* jwk */);
+int jwk_can_produce_signature(const json_t* /* jwk */);

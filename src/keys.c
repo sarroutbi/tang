@@ -458,14 +458,17 @@ create_new_keys(const char* jwkdir)
             result = 0;
             break;
         }
+        /* Recorded before the chmod: a file whose chmod fails must be
+         * unlinked by the rollback too, or it stays behind as a
+         * partial key set. */
+        snprintf(written[nwritten], PATH_MAX, "%s", path);
+        nwritten++;
         /* Set 0440 permission for the new key. */
         if (chmod(path, S_IRUSR | S_IRGRP) == -1) {
             fprintf(stderr, "Unable to set permissions for JWK file (%s)\n", path);
             result = 0;
             break;
         }
-        snprintf(written[nwritten], PATH_MAX, "%s", path);
-        nwritten++;
     }
     if (result == 0) {
         for (size_t i = 0; i < nwritten; i++) {

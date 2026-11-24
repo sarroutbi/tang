@@ -17,7 +17,29 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <jansson.h>
+
+/* Fault injection for create_new_keys' rollback: the key paths are
+ * random thumbprints, so a save failure at a later key cannot be
+ * forced with pre-created files. keys.c's json_dump_file calls are
+ * rewritten to this wrapper (the same macro-stub pattern test-pqc.c.in
+ * uses for http_reply); the wrapper still performs the real saves
+ * until the injected failure point. */
+static int json_dump_fail_after = -1;
+static int json_dump_calls = 0;
+
+static int
+test_json_dump_file(const json_t* jwk, const char* path, size_t flags)
+{
+    if (json_dump_fail_after >= 0 && json_dump_calls++ >= json_dump_fail_after) {
+        return -1;
+    }
+    return json_dump_file(jwk, path, flags);
+}
+
+#define json_dump_file test_json_dump_file
 #include "keys.c"
+#undef json_dump_file
 #include "test-util.h"
 
 const char* jwkdir = "@testjwkdir@";
@@ -136,6 +158,53 @@ test_create_new_keys_save_failure(void)
                     "create_new_keys must restore the umask on failure");
 
     remove_tempdir(tmpdir);
+}
+
+/* The rollback must remove the keys written before a later one fails:
+ * a partial key set left behind would look like a populated keydir to
+ * the regeneration trigger and wedge the store. The save failure is
+ * injected at the write step (see test_json_dump_file above), since
+ * key paths are random thumbprints. */
+static void
+test_create_new_keys_rollback(void)
+{
+    __attribute__((cleanup(cleanup_str))) char* newdir = create_tempdir();
+    ASSERT(newdir);
+
+    mode_t old_umask = umask(0022);
+    /* Fail on the second save (ECMR): ES512 is written and must be
+     * unlinked again. Both are mandatory keys, so the failure point
+     * does not depend on jose's ML-KEM support. */
+    json_dump_calls = 0;
+    json_dump_fail_after = 1;
+    int ret = create_new_keys(newdir);
+    json_dump_fail_after = -1;
+    ASSERT(ret == 0);
+    ASSERT_WITH_MSG(umask(old_umask) == old_umask,
+                    "create_new_keys must restore the umask on failure");
+
+    /* Nothing was left behind. */
+    DIR* dir = opendir(newdir);
+    ASSERT(dir);
+    int files = 0;
+    struct dirent* d;
+    while ((d = readdir(dir)) != NULL) {
+        if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0) {
+            continue;
+        }
+        files++;
+    }
+    closedir(dir);
+    ASSERT_WITH_MSG(files == 0, "rollback left %d file(s) behind", files);
+
+    /* The empty keydir means the next read_keys retries the
+     * generation instead of wedging. */
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
+        read_keys(newdir);
+    ASSERT(tki);
+    ASSERT(tki->m_keys_count >= 2);
+
+    remove_tempdir(newdir);
 }
 
 static void
@@ -1062,6 +1131,7 @@ run_tests(void)
     test_read_keys_no_signing_keys();
     test_is_valid_kem_alg();
     test_create_new_keys_save_failure();
+    test_create_new_keys_rollback();
 }
 
 int main(int argc, char** argv)

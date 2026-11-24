@@ -740,6 +740,30 @@ adv_kem(http_method_t method, const char *path, const char *body,
                       "\r\n%s", strlen(out), out);
 }
 
+/* A retained (rotated) key may co-sign the KEM advertisement only
+ * when it can actually sign: kty AKP is skipped entirely, like
+ * prepare_payload_and_sign() diverts it (RFC 9864 AKP also covers
+ * signature algorithms, so a key_ops check cannot tell a KEM key from
+ * a signer, and jose_jws_sig cannot infer a signature algorithm for
+ * an AKP key at all), and a key without private material cannot sign
+ * either -- the same shape as jwk_has_complete_kem_material on the
+ * KEM side. jose_jws_sig is all-or-nothing over the key array: one
+ * unusable retained key would make jwk_sign() fail and take down
+ * every /adv-kem/<thp> with a 404 while /adv stays healthy. */
+static int
+jwk_usable_as_retained_signer(const json_t *jwk)
+{
+    const char *kty = json_string_value(json_object_get(jwk, "kty"));
+    if (!kty || strcmp(kty, "AKP") == 0)
+        return 0;
+
+    if (!jwk_valid_for_signing(jwk))
+        return 0;
+
+    const json_t *d = json_object_get(jwk, "d");
+    return json_is_string(d) && json_string_length(d) > 0;
+}
+
 static json_t*
 find_jws_kem_by_thp(struct tang_keys_info *keys_info, const char *thumbprint)
 {
@@ -792,7 +816,7 @@ find_jws_kem_by_thp(struct tang_keys_info *keys_info, const char *thumbprint)
     size_t idx;
     json_t *jwk;
     json_array_foreach(keys_info->m_rotated_keys, idx, jwk) {
-        if (!jwk_valid_for_signing(jwk))
+        if (!jwk_usable_as_retained_signer(jwk))
             continue;
         if (json_array_append(sign, jwk) < 0)
             return NULL;

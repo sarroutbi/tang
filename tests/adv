@@ -149,6 +149,23 @@ adv_kem_test () {
     code=$(curl -sg -o /dev/null -w "%{http_code}" \
         "http://127.0.0.1:${PORT}${prefix}/adv-kem/${pubonly_kid}")
     [ "$code" = "404" ]
+
+    # A retained key that cannot sign must not take /adv-kem down:
+    # jose_jws_sig is all-or-nothing over the signer array, so a hidden
+    # unrestricted AKP key or a hidden pub-only signer would turn every
+    # /adv-kem/<thp> into a 404 while /adv stays healthy, and every
+    # hybrid decrypt would fail until the file is removed by hand.
+    jose jwk gen -i '{"alg":"ML-KEM-768"}' | jose fmt -j- -Od key_ops -o- \
+        > $TMP/db/.rogue-akp.jwk
+    jose jwk gen -i '{"alg":"ES512"}' | jose fmt -j- -Od d -o- \
+        > $TMP/db/.rogue-pub-only.jwk
+    kem_thp=$(fetch "${prefix}/adv-kem?alg=ML-KEM-768" \
+        | jose fmt -j- -Og payload -SyOg keys -A -g 0 -o- \
+        | jose jwk thp -a S256 -i-)
+    code=$(curl -sg -o /dev/null -w "%{http_code}" \
+        "http://127.0.0.1:${PORT}${prefix}/adv-kem/${kem_thp}")
+    [ "$code" = "200" ]
+    fetch "${prefix}/adv-kem/${kem_thp}" | ver $TMP/db/sig.jwk
 }
 
 adv_startup () {

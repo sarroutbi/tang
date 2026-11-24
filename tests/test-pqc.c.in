@@ -490,6 +490,86 @@ test_find_jws_kem_by_thp_rotated_signer(void)
     remove_tempdir(tmpdir);
 }
 
+/* A retained key that cannot sign must not take the /adv-kem
+ * advertisement down: jose_jws_sig is all-or-nothing over the signer
+ * array, so a hidden unrestricted AKP key (which the permission check
+ * alone would admit, and for which no signature algorithm can be
+ * inferred) or a hidden pub-only signing key would make jwk_sign()
+ * fail and turn every /adv-kem/<thp> into a 404 while /adv stays
+ * healthy. */
+static void
+test_find_jws_kem_by_thp_unusable_retained_keys(void)
+{
+    __attribute__((cleanup(str_cleanup))) char *tmpdir = copy_fixture();
+    ASSERT(tmpdir);
+
+    json_auto_t *kem = json_pack("{s:s}", "alg", "ML-KEM-768");
+    if (kem && jose_jwk_gen(NULL, kem)) {
+        __attribute__((cleanup(str_cleanup))) char *kem_thp =
+            dump_jwk_to_dir(kem, tmpdir);
+        ASSERT(kem_thp);
+    }
+
+    /* A hidden AKP key with key_ops deleted: unrestricted, so the
+     * permission check alone would admit it as a "signer". */
+    json_auto_t *rogue_akp = json_pack("{s:s}", "alg", "ML-KEM-768");
+    ASSERT(rogue_akp && jose_jwk_gen(NULL, rogue_akp));
+    json_object_del(rogue_akp, "key_ops");
+    __attribute__((cleanup(str_cleanup))) char *rogue_akp_thp =
+        jwk_thumbprint(rogue_akp, "S256");
+    ASSERT(rogue_akp_thp);
+    char rogue_akp_path[PATH_MAX];
+    snprintf(rogue_akp_path, sizeof(rogue_akp_path), "%s/.%s.jwk",
+             tmpdir, rogue_akp_thp);
+    ASSERT(json_dump_file(rogue_akp, rogue_akp_path, JSON_COMPACT) == 0);
+
+    /* A hidden pub-only signing key: no private material to sign
+     * with. */
+    json_auto_t *pub_only = json_pack("{s:s}", "alg", "ES512");
+    ASSERT(pub_only && jose_jwk_gen(NULL, pub_only));
+    json_object_del(pub_only, "d");
+    __attribute__((cleanup(str_cleanup))) char *pub_only_thp =
+        jwk_thumbprint(pub_only, "S256");
+    ASSERT(pub_only_thp);
+    char pub_only_path[PATH_MAX];
+    snprintf(pub_only_path, sizeof(pub_only_path), "%s/.%s.jwk",
+             tmpdir, pub_only_thp);
+    ASSERT(json_dump_file(pub_only, pub_only_path, JSON_COMPACT) == 0);
+
+    __attribute__((cleanup(cleanup_tang_keys_info)))
+        struct tang_keys_info *keys_info = read_keys(tmpdir);
+    ASSERT(keys_info);
+
+    if (!keys_info->m_has_pqc) {
+        fprintf(stderr, "No PQC support, skipping unusable retained keys test\n");
+        remove_tempdir(tmpdir);
+        return;
+    }
+
+    /* Both hidden keys must have been loaded as retained. */
+    ASSERT(json_array_size(keys_info->m_rotated_keys) >= 3);
+
+    json_t *kem_key = json_array_get(keys_info->m_kem_payload, 0);
+    ASSERT(kem_key);
+    __attribute__((cleanup(str_cleanup))) char *kem_thp =
+        jwk_thumbprint(kem_key, "S256");
+    ASSERT(kem_thp);
+
+    /* The advertisement is still produced and still verifies. */
+    json_auto_t *signed_keys = find_jws_kem_by_thp(keys_info, kem_thp);
+    ASSERT_WITH_MSG(signed_keys,
+                    "an unusable retained key took down /adv-kem");
+
+    json_t *current = json_array_get(keys_info->m_sign, 0);
+    ASSERT(current);
+    json_auto_t *current_pub = json_deep_copy(current);
+    ASSERT(current_pub);
+    ASSERT(jose_jwk_pub(NULL, current_pub));
+    ASSERT(jose_jws_ver(NULL, signed_keys, NULL, current_pub, 1));
+
+    remove_tempdir(tmpdir);
+}
+
 static void
 test_find_jws_kem_by_thp_rejects_non_kem(void)
 {
@@ -2305,6 +2385,7 @@ run_tests(void)
     test_find_jws_kem_by_thp_null();
     test_find_jws_kem_by_thp_lookup();
     test_find_jws_kem_by_thp_rotated_signer();
+    test_find_jws_kem_by_thp_unusable_retained_keys();
     test_find_jws_kem_by_thp_rejects_non_kem();
     test_find_jws_kem_by_thp_rejects_unsupported_alg();
 

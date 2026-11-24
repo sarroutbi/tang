@@ -162,7 +162,7 @@ test_create_new_keys_save_failure(void)
     mode_t old_umask = umask(0022);
     ASSERT_WITH_MSG(create_new_keys(missing_dir) == 0,
                     "create_new_keys must fail when the key cannot be saved");
-    ASSERT_WITH_MSG(umask(old_umask) == old_umask,
+    ASSERT_WITH_MSG(umask(old_umask) == 0022,
                     "create_new_keys must restore the umask on failure");
 
     remove_tempdir(tmpdir);
@@ -209,7 +209,7 @@ test_create_new_keys_rollback(void)
     int ret = create_new_keys(newdir);
     json_dump_fail_after = -1;
     ASSERT(ret == 0);
-    ASSERT_WITH_MSG(umask(old_umask) == old_umask,
+    ASSERT_WITH_MSG(umask(old_umask) == 0022,
                     "create_new_keys must restore the umask on failure");
 
     /* Nothing was left behind. */
@@ -250,7 +250,7 @@ test_create_new_keys_rollback_complete_file(void)
     json_dump_fail_after = -1;
     json_dump_fail_saved = 0;
     ASSERT(ret == 0);
-    ASSERT_WITH_MSG(umask(old_umask) == old_umask,
+    ASSERT_WITH_MSG(umask(old_umask) == 0022,
                     "create_new_keys must restore the umask on failure");
 
     /* Nothing was left behind, the complete-but-failed key

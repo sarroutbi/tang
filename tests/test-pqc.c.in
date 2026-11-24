@@ -1149,9 +1149,10 @@ test_validate_request_protected(void)
 }
 
 /* /rec-kem must not bind to an ECMR key that /rec would reject: a
- * public-only key, a key whose key_ops exclude deriveKey, and an
- * unrestricted key (no use/key_ops), which jose permits for deriveKey
- * only when req = false. */
+ * public-only key, a key whose "d" is present but empty, a key whose
+ * key_ops exclude deriveKey, and an unrestricted key (no
+ * use/key_ops), which jose permits for deriveKey only when
+ * req = false. */
 static void
 test_validate_request_protected_ecmr_key_types(void)
 {
@@ -1170,6 +1171,14 @@ test_validate_request_protected_ecmr_key_types(void)
     __attribute__((cleanup(str_cleanup))) char *pub_thp =
         dump_jwk_to_dir(pub_only, tmpdir);
     ASSERT(pub_thp);
+
+    /* Empty "d": present, but no private material either. */
+    json_auto_t *empty_d = json_pack("{s:s}", "alg", "ECMR");
+    ASSERT(empty_d && jose_jwk_gen(NULL, empty_d));
+    ASSERT(json_object_set_new(empty_d, "d", json_string("")) == 0);
+    __attribute__((cleanup(str_cleanup))) char *empty_d_thp =
+        dump_jwk_to_dir(empty_d, tmpdir);
+    ASSERT(empty_d_thp);
 
     /* key_ops without deriveKey. */
     json_auto_t *no_derive = json_pack("{s:s}", "alg", "ECMR");
@@ -1205,8 +1214,8 @@ test_validate_request_protected_ecmr_key_types(void)
 
     const char *kem_kid = "test-kem-kid";
     const char *suite = "ECMR+ML-KEM-768";
-    const char *bad_kids[] = {pub_thp, no_derive_thp, unrestricted_thp,
-                              not_ec_thp, NULL};
+    const char *bad_kids[] = {pub_thp, empty_d_thp, no_derive_thp,
+                              unrestricted_thp, not_ec_thp, NULL};
     for (int i = 0; bad_kids[i]; i++) {
         __attribute__((cleanup(str_cleanup))) char *h =
             build_header_json(DIR_REQUEST, KEM_VERSION, suite, bad_kids[i],

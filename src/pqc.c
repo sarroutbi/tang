@@ -379,7 +379,10 @@ validate_request_protected(const json_t *blob_jwe,
     if (!jose_jwk_prm(NULL, ecmr_key, true, "deriveKey"))
         return 0;
 
-    if (!json_string_value(json_object_get(ecmr_key, "d")))
+    /* An empty "d" is no private material either. json_string_length()
+     * is 0 for a missing member or a non-string, so one check covers
+     * all three -- the same non-empty rule the KEM side enforces. */
+    if (!json_string_length(json_object_get(ecmr_key, "d")))
         return 0;
 
     *out_ecmr_kid = strdup(kid);

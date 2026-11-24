@@ -338,7 +338,7 @@ test_find_jwk(void)
 
     for (int i = 0; hashes[i]; i++) {
         json_array_foreach(keys, idx, jwk) {
-            if (!jwk_valid_for_deriving_keys(jwk)) {
+            if (!jwk_valid_for_deriving_exchange(jwk)) {
                 continue;
             }
             __attribute__((cleanup(cleanup_str))) char* thp = jwk_thumbprint(jwk, hashes[i]);
@@ -589,6 +589,16 @@ test_jwk_thumbprint_missing_members(void)
     snprintf(sig_path, PATH_MAX, "%s/sig.jwk", newdir);
     ASSERT(json_dump_file(sig, sig_path, 0) == 0);
 
+    /* A complete deriving key: without it, the broken key below would
+     * count as "no usable deriving key" and the healing trigger would
+     * regenerate a full key set, which is not what this test is
+     * about. */
+    json_auto_t* exc = jwk_generate("ECMR");
+    ASSERT(exc);
+    char exc_path[PATH_MAX];
+    snprintf(exc_path, PATH_MAX, "%s/exc.jwk", newdir);
+    ASSERT(json_dump_file(exc, exc_path, 0) == 0);
+
     json_auto_t* broken = json_pack("{s:s, s:s, s:[s]}",
                                     "kty", "EC", "crv", "P-521",
                                     "key_ops", "deriveKey");
@@ -600,7 +610,7 @@ test_jwk_thumbprint_missing_members(void)
     __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
         read_keys(newdir);
     ASSERT(tki);
-    ASSERT(tki->m_keys_count == 2);
+    ASSERT(tki->m_keys_count == 3);
     ASSERT(find_jwk(tki, "nonexistent-thumbprint") == NULL);
 
     __attribute__((cleanup(cleanup_str))) char* sig_thp =
@@ -645,7 +655,7 @@ test_read_keys_partial_store_regenerates(void)
     json_t* jwk;
     int has_deriving = 0;
     json_array_foreach(tki->m_payload, idx, jwk) {
-        if (jwk_valid_for_deriving_keys(jwk)) {
+        if (jwk_valid_for_deriving_exchange(jwk)) {
             has_deriving = 1;
             break;
         }
@@ -660,6 +670,122 @@ test_read_keys_partial_store_regenerates(void)
     ASSERT_WITH_MSG(tki2->m_keys_count == tki->m_keys_count,
                     "second read_keys regenerated again: %zu vs %zu",
                     tki2->m_keys_count, tki->m_keys_count);
+
+    remove_tempdir(newdir);
+    umask(old_umask);
+}
+
+/* A public-only ECMR key (e.g. the output of "jose jwk pub", which
+ * preserves key_ops) must not be advertised: clients would bind to
+ * it, since encapsulation only needs crv/x/y, but every later /rec
+ * needs the private half and could only fail with 403. With a
+ * complete deriving key present the store is fine, so no healing is
+ * expected either. */
+static void
+test_read_keys_public_only_exc_not_advertised(void)
+{
+    mode_t old_umask = umask(0022);
+    __attribute__((cleanup(cleanup_str))) char* newdir = create_tempdir();
+    ASSERT(newdir);
+
+    json_auto_t* sig = jwk_generate("ES512");
+    ASSERT(sig);
+    char sig_path[PATH_MAX];
+    snprintf(sig_path, PATH_MAX, "%s/sig.jwk", newdir);
+    ASSERT(json_dump_file(sig, sig_path, 0) == 0);
+
+    json_auto_t* exc = jwk_generate("ECMR");
+    ASSERT(exc);
+    __attribute__((cleanup(cleanup_str))) char* exc_thp =
+        jwk_thumbprint(exc, "S256");
+    ASSERT(exc_thp);
+    char exc_path[PATH_MAX];
+    snprintf(exc_path, PATH_MAX, "%s/%s.jwk", newdir, exc_thp);
+    ASSERT(json_dump_file(exc, exc_path, 0) == 0);
+
+    json_auto_t* pub_only = jwk_generate("ECMR");
+    ASSERT(pub_only);
+    json_object_del(pub_only, "d");
+    __attribute__((cleanup(cleanup_str))) char* pub_only_thp =
+        jwk_thumbprint(pub_only, "S256");
+    ASSERT(pub_only_thp);
+    char pub_only_path[PATH_MAX];
+    snprintf(pub_only_path, PATH_MAX, "%s/%s.jwk", newdir, pub_only_thp);
+    ASSERT(json_dump_file(pub_only, pub_only_path, 0) == 0);
+
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
+        read_keys(newdir);
+    ASSERT(tki);
+    /* The complete deriving key keeps the healing trigger quiet. */
+    ASSERT(tki->m_keys_count == 3);
+
+    size_t idx;
+    json_t* jwk;
+    int has_complete_exc = 0;
+    json_array_foreach(tki->m_payload, idx, jwk) {
+        __attribute__((cleanup(cleanup_str))) char* thp =
+            jwk_thumbprint(jwk, "S256");
+        ASSERT_WITH_MSG(thp && strcmp(thp, pub_only_thp) != 0,
+                        "public-only ECMR key advertised in the payload");
+        if (thp && strcmp(thp, exc_thp) == 0) {
+            has_complete_exc = 1;
+        }
+    }
+    ASSERT_WITH_MSG(has_complete_exc,
+                    "complete ECMR key missing from the payload");
+
+    remove_tempdir(newdir);
+    umask(old_umask);
+}
+
+/* The same store without a complete deriving key: the healing trigger
+ * counts usable deriving keys only, so a public-only ECMR key no
+ * longer masks a store that cannot serve recovery, and read_keys
+ * repairs it. */
+static void
+test_read_keys_public_only_exc_heals(void)
+{
+    mode_t old_umask = umask(0022);
+    __attribute__((cleanup(cleanup_str))) char* newdir = create_tempdir();
+    ASSERT(newdir);
+
+    json_auto_t* sig = jwk_generate("ES512");
+    ASSERT(sig);
+    char sig_path[PATH_MAX];
+    snprintf(sig_path, PATH_MAX, "%s/sig.jwk", newdir);
+    ASSERT(json_dump_file(sig, sig_path, 0) == 0);
+
+    json_auto_t* pub_only = jwk_generate("ECMR");
+    ASSERT(pub_only);
+    json_object_del(pub_only, "d");
+    __attribute__((cleanup(cleanup_str))) char* pub_only_thp =
+        jwk_thumbprint(pub_only, "S256");
+    ASSERT(pub_only_thp);
+    char pub_only_path[PATH_MAX];
+    snprintf(pub_only_path, PATH_MAX, "%s/pubonly.jwk", newdir);
+    ASSERT(json_dump_file(pub_only, pub_only_path, 0) == 0);
+
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
+        read_keys(newdir);
+    ASSERT_WITH_MSG(tki, "read_keys must heal the store, not fail");
+    /* The regenerated full key set was added alongside. */
+    ASSERT_WITH_MSG(tki->m_keys_count >= 4,
+                    "store not healed: %zu keys", tki->m_keys_count);
+
+    size_t idx;
+    json_t* jwk;
+    int has_deriving = 0;
+    json_array_foreach(tki->m_payload, idx, jwk) {
+        __attribute__((cleanup(cleanup_str))) char* thp =
+            jwk_thumbprint(jwk, "S256");
+        ASSERT_WITH_MSG(thp && strcmp(thp, pub_only_thp) != 0,
+                        "public-only ECMR key advertised in the payload");
+        if (jwk_valid_for_deriving_exchange(jwk)) {
+            has_deriving = 1;
+        }
+    }
+    ASSERT_WITH_MSG(has_deriving,
+                    "healed store has no usable deriving key");
 
     remove_tempdir(newdir);
     umask(old_umask);
@@ -931,6 +1057,8 @@ run_tests(void)
     test_read_keys_with_advertised_akp();
     test_read_keys_with_public_only_akp();
     test_read_keys_partial_store_regenerates();
+    test_read_keys_public_only_exc_not_advertised();
+    test_read_keys_public_only_exc_heals();
     test_read_keys_no_signing_keys();
     test_is_valid_kem_alg();
     test_create_new_keys_save_failure();

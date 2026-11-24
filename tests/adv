@@ -190,6 +190,21 @@ adv_second_phase () {
     fetch "${ENDPOINT}"/adv/`jose jwk thp -i $TMP/db/exc.jwk` && expected_fail
     fetch "${ENDPOINT}"/adv/`jose jwk thp -a S512 -i $TMP/db/exc.jwk` && expected_fail
 
+    # A public-only ECMR key (e.g. the output of "jose jwk pub", which
+    # preserves key_ops) must not be advertised: clients would bind to
+    # it, since encapsulation only needs crv/x/y, but every later
+    # recovery needs the private half and could only fail.
+    jose jwk gen -i '{"alg":"ECMR"}' | jose jwk pub -i- \
+        > $TMP/db/pubonly-exc.jwk
+    pubonly_exc_thp=$(jose jwk thp -i $TMP/db/pubonly-exc.jwk)
+    fetch "${ENDPOINT}"/adv | jose fmt -j- -Og payload -SyOg keys -f- \
+        | while read -r jwk; do
+              thp=$(printf '%s' "$jwk" | jose jwk thp -i-)
+              [ "$thp" != "$pubonly_exc_thp" ]
+          done
+    [ $? -eq 0 ]
+    rm -f $TMP/db/pubonly-exc.jwk
+
     # The default advertisement fetch should succeed and pass verification
     fetch "${ENDPOINT}"/adv
     fetch "${ENDPOINT}"/adv | ver $TMP/db/sig.jwk

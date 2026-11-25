@@ -1268,10 +1268,12 @@ test_read_keys_no_signing_keys(void)
  * kept, so unlike the output of "jose jwk pub" it still passes the
  * permission checks -- must not be admitted as the active signer:
  * nothing can produce a signature with it. With a complete deriving
- * key in the store the healing trigger stays quiet, so read_keys()
- * fails and every endpoint, /version included, answers 500 -- the
- * broken-store signal -- instead of /adv and /adv-kem answering 404
- * while /version keeps saying 200. */
+ * key in the store the healing trigger stays quiet, so the strict
+ * read fails and every advertisement or capability endpoint,
+ * /version included, answers 500 -- the broken-store signal --
+ * instead of /adv and /adv-kem answering 404 while /version keeps
+ * saying 200. The recovery endpoints are exempt: see
+ * test_read_keys_for_recovery_broken_signer. */
 static void
 test_read_keys_public_only_signer_fails(void)
 {
@@ -1364,6 +1366,106 @@ test_read_keys_public_only_signer_ignored(void)
     umask(old_umask);
 }
 
+/* The recovery read: /rec and /rec-kem never sign, so a store whose
+ * signers are all unusable -- here a hand-edited public-only ES512
+ * key, "d" removed and key_ops kept, next to a healthy deriving key
+ * -- must still load for recovery while the strict read keeps
+ * failing: an operator restoring a broken signer from a backup must
+ * not take unlocking down for existing clients. */
+static void
+test_read_keys_for_recovery_broken_signer(void)
+{
+    mode_t old_umask = umask(0022);
+    __attribute__((cleanup(cleanup_str))) char* newdir = create_tempdir();
+    ASSERT(newdir);
+
+    json_auto_t* pub_only = jwk_generate("ES512");
+    ASSERT(pub_only);
+    json_object_del(pub_only, "d");
+    char pub_only_path[PATH_MAX];
+    snprintf(pub_only_path, PATH_MAX, "%s/pubonly.jwk", newdir);
+    ASSERT(json_dump_file(pub_only, pub_only_path, 0) == 0);
+
+    /* A complete deriving key keeps the healing trigger quiet, so
+     * the state can only be left by the missing usable signer. */
+    json_auto_t* exc = jwk_generate("ECMR");
+    ASSERT(exc);
+    __attribute__((cleanup(cleanup_str))) char* exc_thp =
+        jwk_thumbprint(exc, "S256");
+    ASSERT(exc_thp);
+    char exc_path[PATH_MAX];
+    snprintf(exc_path, PATH_MAX, "%s/exc.jwk", newdir);
+    ASSERT(json_dump_file(exc, exc_path, 0) == 0);
+
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* strict =
+        read_keys(newdir);
+    ASSERT_WITH_MSG(strict == NULL,
+                    "the strict read must keep failing without a usable signer");
+
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
+        read_keys_for_recovery(newdir);
+    ASSERT_WITH_MSG(tki,
+                    "recovery must tolerate a store without a usable signer");
+    ASSERT(json_array_size(tki->m_sign) == 0);
+
+    /* The deriving key is still resolvable and recoverable. */
+    json_t* jwk = find_jwk(tki, exc_thp);
+    ASSERT_WITH_MSG(jwk && jwk_valid_for_ecmr_recovery(jwk),
+                    "the deriving key must stay recoverable");
+
+    remove_tempdir(newdir);
+    umask(old_umask);
+}
+
+/* Recovery resolves the thumbprint against rotated keys too and
+ * needs no advertised payload: a store whose only deriving key is
+ * rotated (hidden) and whose only signer is broken still serves /rec
+ * for the rotated key. */
+static void
+test_read_keys_for_recovery_rotated_deriving_key(void)
+{
+    mode_t old_umask = umask(0022);
+    __attribute__((cleanup(cleanup_str))) char* newdir = create_tempdir();
+    ASSERT(newdir);
+
+    json_auto_t* pub_only = jwk_generate("ES512");
+    ASSERT(pub_only);
+    json_object_del(pub_only, "d");
+    char pub_only_path[PATH_MAX];
+    snprintf(pub_only_path, PATH_MAX, "%s/pubonly.jwk", newdir);
+    ASSERT(json_dump_file(pub_only, pub_only_path, 0) == 0);
+
+    json_auto_t* exc = jwk_generate("ECMR");
+    ASSERT(exc);
+    __attribute__((cleanup(cleanup_str))) char* exc_thp =
+        jwk_thumbprint(exc, "S256");
+    ASSERT(exc_thp);
+    char exc_path[PATH_MAX];
+    snprintf(exc_path, PATH_MAX, "%s/.%s.jwk", newdir, exc_thp);
+    ASSERT(json_dump_file(exc, exc_path, 0) == 0);
+
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* strict =
+        read_keys(newdir);
+    ASSERT_WITH_MSG(strict == NULL,
+                    "the strict read must keep failing without a usable signer");
+
+    __attribute__((cleanup(cleanup_tang_keys_info))) struct tang_keys_info* tki =
+        read_keys_for_recovery(newdir);
+    ASSERT_WITH_MSG(tki,
+                    "recovery must tolerate a store without a usable signer");
+
+    /* Nothing is advertised and nothing can sign; the rotated
+     * deriving key is still resolvable and recoverable. */
+    ASSERT(json_array_size(tki->m_payload) == 0);
+    ASSERT(json_array_size(tki->m_sign) == 0);
+    json_t* jwk = find_jwk(tki, exc_thp);
+    ASSERT_WITH_MSG(jwk && jwk_valid_for_ecmr_recovery(jwk),
+                    "the rotated deriving key must stay recoverable");
+
+    remove_tempdir(newdir);
+    umask(old_umask);
+}
+
 static void
 test_find_by_thp_null(void)
 {
@@ -1407,6 +1509,8 @@ run_tests(void)
     test_read_keys_no_signing_keys();
     test_read_keys_public_only_signer_fails();
     test_read_keys_public_only_signer_ignored();
+    test_read_keys_for_recovery_broken_signer();
+    test_read_keys_for_recovery_rotated_deriving_key();
     test_read_keys_alg_removed_exc_not_advertised();
     test_read_keys_alg_removed_exc_heals();
     test_is_valid_kem_alg();

@@ -143,7 +143,12 @@ rec(http_method_t method, const char *path, const char *body,
     /*
      * Parse and validate the server-side JWK
      */
-    tki = read_keys(jwkdir);
+    /* Recovery never signs: read the store in the recovery mode, so
+     * a store whose signers are all unusable (e.g. a public-only
+     * signer restored from a backup) keeps serving unlocking, while
+     * /adv and /version keep answering 500 as the broken-store
+     * signal. */
+    tki = read_keys_for_recovery(jwkdir);
     if (!tki || tki->m_keys_count == 0) {
         return http_reply(HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL);
     }

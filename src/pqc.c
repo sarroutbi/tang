@@ -867,11 +867,13 @@ find_jws_kem_by_thp(struct tang_keys_info *keys_info, const char *thumbprint)
 /* Extracts the thumbprint captured in matches[1] and loads the key
  * store from jwkdir, so the KEM endpoints share a single status
  * mapping instead of diverging copies: 400 when the path carries no
- * thumbprint, 500 when the key store cannot be read. Returns the
- * thumbprint (owned by the caller) and stores the owning key set info
- * in *out_tki, or NULL with *out_status set. */
+ * thumbprint, 500 when the key store cannot be read in the
+ * requested mode. Returns the thumbprint (owned by the caller) and
+ * stores the owning key set info in *out_tki, or NULL with
+ * *out_status set. */
 static char *
 load_thp_keys(const char *path, regmatch_t matches[], const char *jwkdir,
+              keys_read_mode mode,
               struct tang_keys_info **out_tki, int *out_status)
 {
     *out_tki = NULL;
@@ -882,7 +884,9 @@ load_thp_keys(const char *path, regmatch_t matches[], const char *jwkdir,
         return NULL;
     }
 
-    struct tang_keys_info *tki = read_keys(jwkdir);
+    struct tang_keys_info *tki = mode == KEYS_READ_RECOVERY
+        ? read_keys_for_recovery(jwkdir)
+        : read_keys(jwkdir);
     if (!tki || tki->m_keys_count == 0)
         return NULL;
     *out_tki = tki;
@@ -909,8 +913,8 @@ adv_kem_thp(http_method_t method, const char *path, const char *body,
     if (!pqc_is_available())
         return http_reply(HTTP_STATUS_NOT_FOUND, NULL);
 
-    thumbprint = load_thp_keys(path, matches, jwkdir, &keys_info,
-                               &status);
+    thumbprint = load_thp_keys(path, matches, jwkdir, KEYS_READ_STRICT,
+                               &keys_info, &status);
     if (!thumbprint)
         return http_reply(status, NULL);
 
@@ -953,7 +957,12 @@ rec_kem(http_method_t method, const char *path, const char *body,
     if (!req)
         return http_reply(HTTP_STATUS_BAD_REQUEST, NULL);
 
-    thp = load_thp_keys(path, matches, jwkdir, &tki, &status);
+    /* Recovery never signs: like /rec, read the store in the
+     * recovery mode, so a store whose signers are all unusable keeps
+     * serving unlocking while the advertisement endpoints keep
+     * answering 500. */
+    thp = load_thp_keys(path, matches, jwkdir, KEYS_READ_RECOVERY,
+                        &tki, &status);
     if (!thp)
         return http_reply(status, NULL);
 

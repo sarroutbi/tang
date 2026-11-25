@@ -44,9 +44,19 @@ struct tang_keys_info {
                                      available among regular keys. */
 };
 
+/* What a caller needs the key store to guarantee beyond being
+ * loadable at all: the advertisement and capability endpoints
+ * refuse a store without a usable signer, the recovery endpoints
+ * do not. */
+typedef enum {
+    KEYS_READ_STRICT,
+    KEYS_READ_RECOVERY,
+} keys_read_mode;
+
 void cleanup_tang_keys_info(struct tang_keys_info**);
 void free_tang_keys_info(struct tang_keys_info*);
 struct tang_keys_info* read_keys(const char* /* jwkdir */);
+struct tang_keys_info* read_keys_for_recovery(const char* /* jwkdir */);
 json_t* jwk_sign(const json_t* /* to_sign */, const json_t* /* sig_keys */);
 json_t* find_jws(struct tang_keys_info* /* tki */, const char* /* thp */);
 json_t* find_jwk(struct tang_keys_info* /* tki */, const char* /* thp */);

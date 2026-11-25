@@ -1,0 +1,73 @@
+#!/bin/sh -ex
+# vim: set tabstop=8 shiftwidth=4 softtabstop=4 expandtab smarttab colorcolumn=80:
+#
+# Copyright (c) 2026 Red Hat, Inc.
+# Author: Sergio Arroutbi <sarroutb@redhat.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+. rec
+
+# A healthy deriving key (and an ML-KEM key when the runtime supports
+# one) next to a signer that cannot sign: "d" removed, key_ops kept,
+# the shape a restored backup can leave behind. The strict read
+# fails, so /adv and /version answer 500 as the broken-store signal,
+# while /rec and /rec-kem keep serving: recovery never needs a
+# signer, so an operator restoring a broken signer cannot take
+# unlocking down for existing clients.
+rec_startup
+
+# Break the active signer: remove the private material, keep
+# key_ops, so it still passes the permission checks but can never
+# produce a signature.
+jose fmt -j "$TMP/db/sig.jwk" -Od d -o "$TMP/db/sig.pubonly.jwk"
+mv "$TMP/db/sig.pubonly.jwk" "$TMP/db/sig.jwk"
+chmod 0440 "$TMP/db/sig.jwk"
+
+# An ML-KEM key, so /rec-kem is exercised with a broken signer too.
+if build_has_pqc && jose_supports_alg "ML-KEM-768"; then
+    jose jwk gen -i '{"alg":"ML-KEM-768"}' -o "$TMP/db/kem.jwk"
+    chmod 0440 "$TMP/db/kem.jwk"
+fi
+
+# Start the server
+export PORT=$(random_port)
+start_standalone_server "${PORT}"
+export PID=$!
+wait_for_port ${PORT}
+
+# The advertisement and capability endpoints answer 500: the
+# broken-store signal must stay.
+code=$(curl -s -o /dev/null -w "%{http_code}" \
+    "http://127.0.0.1:${PORT}/adv")
+[ "${code}" = "500" ]
+
+code=$(curl -s -o /dev/null -w "%{http_code}" \
+    "http://127.0.0.1:${PORT}/version")
+[ "${code}" = "500" ]
+
+# /rec keeps serving: the exchange result matches a locally
+# performed one (NOTE: this is insecure! Don't do this in real code!)
+good=`jose jwk exc -i '{"alg":"ECMR","key_ops":["deriveKey"]}' -l $TMP/exc.jwk -r $TMP/db/exc.jwk`
+full_resp=`curl -sf -X POST \
+       -H "Content-Type: application/jwk+json" \
+       --data-binary @- \
+       http://127.0.0.1:${PORT}/rec/${exc_kid} < $TMP/exc.pub.jwk`
+test=`printf '%s' "$full_resp" | jose fmt -j- -Od tang_pub -o-`
+[ "$good" = "$test" ]
+
+# /rec-kem keeps serving with a broken signer as well (a no-op when
+# neither the build nor the runtime supports ML-KEM).
+rec_kem_test ""

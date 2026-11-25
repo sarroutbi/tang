@@ -438,9 +438,11 @@ prepare_payload_and_sign(struct tang_keys_info* tki)
          * m_sign, so a hand-edited public-only key that kept its
          * key_ops would take /adv and /adv-kem down with a 404 while
          * /version keeps answering 200. With the probe, a store left
-         * without any usable signer fails read_keys() and every
-         * endpoint -- /version included -- answers 500: the
-         * broken-store signal, not a silent half-healthy server. */
+         * without any usable signer fails the strict read (see
+         * keys_satisfy_read_mode()) and every advertisement or
+         * capability endpoint -- /version included -- answers 500:
+         * the broken-store signal, not a silent half-healthy
+         * server. */
         if (jwk_valid_for_signing_and_verifying(jwk)
                 && jwk_can_produce_signature(jwk)) {
             if (json_array_append(tki->m_sign, jwk) == -1) {
@@ -456,9 +458,6 @@ prepare_payload_and_sign(struct tang_keys_info* tki)
         }
     }
     tki->m_has_pqc = json_array_size(tki->m_kem_payload) > 0;
-    if (json_array_size(tki->m_sign) == 0 || json_array_size(tki->m_payload) == 0) {
-        return 0;
-    }
     return 1;
 }
 
@@ -646,8 +645,40 @@ store_lacks_deriving_keys(const struct tang_keys_info* tki)
     return 1;
 }
 
-struct tang_keys_info*
-read_keys(const char* jwkdir)
+/* What each read mode requires of a partitioned key set, beyond the
+ * store being loadable at all.
+ *
+ * The strict read backs the advertisement and capability endpoints:
+ * a store left without a usable signer -- e.g. a hand-edited
+ * public-only key restored from a backup, which passes the
+ * permission checks but can never sign -- must answer 500 there,
+ * the broken-store signal, not serve a half-healthy advertisement.
+ *
+ * The recovery read backs /rec and /rec-kem: recovery resolves the
+ * requested thumbprint against every key in the store, active or
+ * rotated, and validates it with the endpoint's own predicate; it
+ * never signs anything. A store without a usable signer therefore
+ * still serves unlocking for every existing client, so an operator
+ * restoring a broken signer from a backup cannot take recovery
+ * down. The healing trigger cannot repair this state (it only
+ * regenerates deriving keys), so without this tolerance recovery
+ * would stay down until the store is fixed by hand. */
+static int
+keys_satisfy_read_mode(const struct tang_keys_info* tki,
+                       keys_read_mode mode)
+{
+    if (!tki) {
+        return 0;
+    }
+    if (mode == KEYS_READ_RECOVERY) {
+        return 1;
+    }
+    return json_array_size(tki->m_sign) > 0
+        && json_array_size(tki->m_payload) > 0;
+}
+
+static struct tang_keys_info*
+read_keys_in_mode(const char* jwkdir, keys_read_mode mode)
 {
     struct tang_keys_info* tki = load_keys(jwkdir);
     if (!tki) {
@@ -663,11 +694,24 @@ read_keys(const char* jwkdir)
         tki = load_keys(jwkdir);
     }
 
-    if (!prepare_payload_and_sign(tki)) {
+    if (!prepare_payload_and_sign(tki)
+            || !keys_satisfy_read_mode(tki, mode)) {
         free_tang_keys_info(tki);
         return NULL;
     }
     return tki;
+}
+
+struct tang_keys_info*
+read_keys(const char* jwkdir)
+{
+    return read_keys_in_mode(jwkdir, KEYS_READ_STRICT);
+}
+
+struct tang_keys_info*
+read_keys_for_recovery(const char* jwkdir)
+{
+    return read_keys_in_mode(jwkdir, KEYS_READ_RECOVERY);
 }
 
 json_t*

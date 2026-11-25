@@ -85,8 +85,12 @@ error_http_limits () {
     [ "${code}" = "413" ]
 }
 
-# A key store without signing keys can neither advertise nor recover:
-# both endpoints must fail with 500 instead of an unsigned payload
+# A key store without signing keys can no longer advertise and its
+# capability report must say "broken": both endpoints fail with 500
+# instead of an unsigned payload or a downgraded-looking report.
+# Recovery keeps serving, since it never needs a signer: an operator
+# who loses every signer must not take unlocking down for existing
+# clients.
 error_no_signing_keys () {
     rm -f $TMP/db/sig.jwk
 
@@ -94,11 +98,12 @@ error_no_signing_keys () {
         "http://127.0.0.1:${PORT}/adv")
     [ "${code}" = "500" ]
 
+    # /rec still answers 200: the deriving key remains recoverable
     code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
         -H "Content-Type: application/jwk+json" \
         --data-binary @$TMP/clt.pub.jwk \
         "http://127.0.0.1:${PORT}/rec/${exc_kid}")
-    [ "${code}" = "500" ]
+    [ "${code}" = "200" ]
 
     # /version must say "broken" (5xx) too, not fold the unusable key
     # store into hybrid_recovery:false: clients gate on this answer,

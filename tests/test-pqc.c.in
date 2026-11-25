@@ -56,8 +56,9 @@ copy_fixture(void)
     return tmpdir;
 }
 
-/* Writes @jwk into @dir as "<thumbprint>.jwk", mirroring the key
- * store layout. Returns the thumbprint, owned by the caller.
+/* Writes @jwk into @dir under its thumbprint: as "<thp>.jwk" for a
+ * regular key, or as the hidden ".<thp>.jwk" a rotation leaves
+ * behind. Returns the thumbprint, owned by the caller.
  *
  * Fails loudly on a thumbprint collision: JWK thumbprints hash only
  * the public members ({alg, kty, pub} for AKP, {crv, kty, x, y} for
@@ -65,14 +66,15 @@ copy_fixture(void)
  * share a filename, and a silent overwrite would quietly remove the
  * earlier fixture from the store. */
 static char *
-dump_jwk_to_dir(json_t *jwk, const char *dir)
+dump_jwk_to_dir_as(json_t *jwk, const char *dir, int hidden)
 {
     __attribute__((cleanup(str_cleanup))) char *thp =
         jwk_thumbprint(jwk, "S256");
     if (!thp)
         return NULL;
     char path[PATH_MAX];
-    if (snprintf(path, PATH_MAX, "%s/%s.jwk", dir, thp) >= PATH_MAX)
+    if (snprintf(path, PATH_MAX, "%s/%s%s.jwk", dir, hidden ? "." : "",
+                 thp) >= PATH_MAX)
         return NULL;
     ASSERT_WITH_MSG(access(path, F_OK) != 0,
                     "thumbprint collision: %s already exists; fixtures "
@@ -81,6 +83,76 @@ dump_jwk_to_dir(json_t *jwk, const char *dir)
     if (json_dump_file(jwk, path, JSON_COMPACT) != 0)
         return NULL;
     return strdup(thp);
+}
+
+static char *
+dump_jwk_to_dir(json_t *jwk, const char *dir)
+{
+    return dump_jwk_to_dir_as(jwk, dir, 0);
+}
+
+static char *
+dump_hidden_jwk_to_dir(json_t *jwk, const char *dir)
+{
+    return dump_jwk_to_dir_as(jwk, dir, 1);
+}
+
+/* Redirects stderr into "<tmpdir>/capture.log", so tests can assert
+ * what the code under test writes there. Returns a fd holding the
+ * original stderr for restore_stderr(), or -1 on failure. */
+static int
+capture_stderr(const char *tmpdir)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/capture.log", tmpdir) >= PATH_MAX)
+        return -1;
+
+    fflush(stderr);
+    int saved = dup(fileno(stderr));
+    if (saved < 0)
+        return -1;
+    if (!freopen(path, "w", stderr)) {
+        close(saved);
+        return -1;
+    }
+    return saved;
+}
+
+/* Points stderr back to the fd @saved returned by capture_stderr()
+ * and returns everything captured since then, owned by the caller
+ * (the empty string when nothing was written). */
+static char *
+restore_stderr(int saved, const char *tmpdir)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/capture.log", tmpdir) >= PATH_MAX)
+        return NULL;
+
+    fflush(stderr);
+    if (dup2(saved, fileno(stderr)) < 0)
+        return NULL;
+    close(saved);
+
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0)
+        goto error;
+    long size = ftell(f);
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0)
+        goto error;
+
+    char *out = malloc(size + 1);
+    if (!out)
+        goto error;
+    size_t got = fread(out, 1, size, f);
+    fclose(f);
+    out[got] = '\0';
+    return out;
+
+error:
+    fclose(f);
+    return NULL;
 }
 
 static void
@@ -520,12 +592,8 @@ test_find_jws_kem_by_thp_unusable_retained_keys(void)
     ASSERT(rogue_akp && jose_jwk_gen(NULL, rogue_akp));
     json_object_del(rogue_akp, "key_ops");
     __attribute__((cleanup(str_cleanup))) char *rogue_akp_thp =
-        jwk_thumbprint(rogue_akp, "S256");
+        dump_hidden_jwk_to_dir(rogue_akp, tmpdir);
     ASSERT(rogue_akp_thp);
-    char rogue_akp_path[PATH_MAX];
-    snprintf(rogue_akp_path, sizeof(rogue_akp_path), "%s/.%s.jwk",
-             tmpdir, rogue_akp_thp);
-    ASSERT(json_dump_file(rogue_akp, rogue_akp_path, JSON_COMPACT) == 0);
 
     /* A hidden pub-only signing key: no private material to sign
      * with. */
@@ -533,12 +601,8 @@ test_find_jws_kem_by_thp_unusable_retained_keys(void)
     ASSERT(pub_only && jose_jwk_gen(NULL, pub_only));
     json_object_del(pub_only, "d");
     __attribute__((cleanup(str_cleanup))) char *pub_only_thp =
-        jwk_thumbprint(pub_only, "S256");
+        dump_hidden_jwk_to_dir(pub_only, tmpdir);
     ASSERT(pub_only_thp);
-    char pub_only_path[PATH_MAX];
-    snprintf(pub_only_path, sizeof(pub_only_path), "%s/.%s.jwk",
-             tmpdir, pub_only_thp);
-    ASSERT(json_dump_file(pub_only, pub_only_path, JSON_COMPACT) == 0);
 
     /* A hidden ECMR key with key_ops deleted: unrestricted, so the
      * permission check alone would admit it as a "signer", but jose
@@ -547,12 +611,8 @@ test_find_jws_kem_by_thp_unusable_retained_keys(void)
     ASSERT(rogue_ecmr && jose_jwk_gen(NULL, rogue_ecmr));
     json_object_del(rogue_ecmr, "key_ops");
     __attribute__((cleanup(str_cleanup))) char *rogue_ecmr_thp =
-        jwk_thumbprint(rogue_ecmr, "S256");
+        dump_hidden_jwk_to_dir(rogue_ecmr, tmpdir);
     ASSERT(rogue_ecmr_thp);
-    char rogue_ecmr_path[PATH_MAX];
-    snprintf(rogue_ecmr_path, sizeof(rogue_ecmr_path), "%s/.%s.jwk",
-             tmpdir, rogue_ecmr_thp);
-    ASSERT(json_dump_file(rogue_ecmr, rogue_ecmr_path, JSON_COMPACT) == 0);
 
     /* A hidden unrestricted ES512 key: jose can sign with it, so it
      * must be admitted -- this pins that the filter drops keys that
@@ -561,12 +621,8 @@ test_find_jws_kem_by_thp_unusable_retained_keys(void)
     ASSERT(unrestricted && jose_jwk_gen(NULL, unrestricted));
     json_object_del(unrestricted, "key_ops");
     __attribute__((cleanup(str_cleanup))) char *unrestricted_thp =
-        jwk_thumbprint(unrestricted, "S256");
+        dump_hidden_jwk_to_dir(unrestricted, tmpdir);
     ASSERT(unrestricted_thp);
-    char unrestricted_path[PATH_MAX];
-    snprintf(unrestricted_path, sizeof(unrestricted_path), "%s/.%s.jwk",
-             tmpdir, unrestricted_thp);
-    ASSERT(json_dump_file(unrestricted, unrestricted_path, JSON_COMPACT) == 0);
 
     __attribute__((cleanup(cleanup_tang_keys_info)))
         struct tang_keys_info *keys_info = read_keys(tmpdir);
@@ -611,6 +667,101 @@ test_find_jws_kem_by_thp_unusable_retained_keys(void)
                                  unrestricted_pub, 1),
                     "an unrestricted signer jose can use was dropped "
                     "from the KEM advertisement");
+
+    remove_tempdir(tmpdir);
+}
+
+/* The skip log policy for retained keys that cannot join the KEM
+ * advertisement signer set: keys that were never signers -- AKP
+ * exchange keys and deriveKey-only keys, e.g. the rotated ECMR key
+ * every rotation leaves behind -- must be skipped silently, since
+ * the /adv-kem/<thp> thumbprints are public and the line count would
+ * grow with every rotation and every fetch. A key that was permitted
+ * to sign but cannot produce a signature is the only drop worth a
+ * log line, and jose must not add one of its own. */
+static void
+test_find_jws_kem_by_thp_skip_log_policy(void)
+{
+    /* Scenario 1: a healthy store after one rotation -- the fixture's
+     * rotated ES512 signer and deriveKey-only ECMR key, plus three
+     * rotated ML-KEM keys -- writes nothing to stderr. */
+    __attribute__((cleanup(str_cleanup))) char *tmpdir = copy_fixture();
+    ASSERT(tmpdir);
+
+    for (int i = 0; i < 3; i++) {
+        json_auto_t *kem = json_pack("{s:s}", "alg", "ML-KEM-768");
+        ASSERT(kem && jose_jwk_gen(NULL, kem));
+        __attribute__((cleanup(str_cleanup))) char *thp =
+            dump_hidden_jwk_to_dir(kem, tmpdir);
+        ASSERT(thp);
+    }
+
+    /* The regular ML-KEM key the advertisement is fetched for. */
+    json_auto_t *kem = json_pack("{s:s}", "alg", "ML-KEM-768");
+    if (kem && jose_jwk_gen(NULL, kem)) {
+        __attribute__((cleanup(str_cleanup))) char *thp =
+            dump_jwk_to_dir(kem, tmpdir);
+        ASSERT(thp);
+    }
+
+    __attribute__((cleanup(cleanup_tang_keys_info)))
+        struct tang_keys_info *keys_info = read_keys(tmpdir);
+    ASSERT(keys_info);
+
+    if (!keys_info->m_has_pqc) {
+        fprintf(stderr, "No PQC support, skipping skip log policy test\n");
+        remove_tempdir(tmpdir);
+        return;
+    }
+
+    json_t *kem_key = json_array_get(keys_info->m_kem_payload, 0);
+    ASSERT(kem_key);
+    __attribute__((cleanup(str_cleanup))) char *kem_thp =
+        jwk_thumbprint(kem_key, "S256");
+    ASSERT(kem_thp);
+
+    int saved = capture_stderr(tmpdir);
+    ASSERT(saved >= 0);
+    json_auto_t *healthy = find_jws_kem_by_thp(keys_info, kem_thp);
+    __attribute__((cleanup(str_cleanup))) char *log =
+        restore_stderr(saved, tmpdir);
+    ASSERT(log);
+    ASSERT_WITH_MSG(healthy, "a healthy rotated key took down /adv-kem");
+    ASSERT_WITH_MSG(strcmp(log, "") == 0,
+                    "a healthy rotation wrote to stderr: %s", log);
+
+    /* Scenario 2: a retained key that is permitted to sign but cannot
+     * (pub-only: key_ops kept, private material deleted) is logged
+     * exactly once, with its thumbprint, and nothing else -- in
+     * particular no jose line -- reaches the log. */
+    json_auto_t *pub_only = json_pack("{s:s}", "alg", "ES512");
+    ASSERT(pub_only && jose_jwk_gen(NULL, pub_only));
+    json_object_del(pub_only, "d");
+    __attribute__((cleanup(str_cleanup))) char *pub_only_thp =
+        dump_hidden_jwk_to_dir(pub_only, tmpdir);
+    ASSERT(pub_only_thp);
+
+    __attribute__((cleanup(cleanup_tang_keys_info)))
+        struct tang_keys_info *updated = read_keys(tmpdir);
+    ASSERT(updated);
+
+    saved = capture_stderr(tmpdir);
+    ASSERT(saved >= 0);
+    json_auto_t *signed_keys = find_jws_kem_by_thp(updated, kem_thp);
+    __attribute__((cleanup(str_cleanup))) char *skip_log =
+        restore_stderr(saved, tmpdir);
+    ASSERT(skip_log);
+    ASSERT_WITH_MSG(signed_keys,
+                    "an unusable retained key took down /adv-kem");
+
+    char expected[MAX_BUF_LEN];
+    ASSERT(snprintf(expected, sizeof(expected),
+                    "Skipping retained key %s: it cannot produce a "
+                    "signature, keeping /adv-kem available\n",
+                    pub_only_thp) < (int)sizeof(expected));
+    ASSERT_WITH_MSG(strcmp(skip_log, expected) == 0,
+                    "unexpected skip log (expected: %s): %s",
+                    expected, skip_log);
 
     remove_tempdir(tmpdir);
 }
@@ -2452,6 +2603,7 @@ run_tests(void)
     test_find_jws_kem_by_thp_lookup();
     test_find_jws_kem_by_thp_rotated_signer();
     test_find_jws_kem_by_thp_unusable_retained_keys();
+    test_find_jws_kem_by_thp_skip_log_policy();
     test_find_jws_kem_by_thp_rejects_non_kem();
     test_find_jws_kem_by_thp_rejects_unsupported_alg();
 

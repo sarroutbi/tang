@@ -727,34 +727,63 @@ adv_kem(http_method_t method, const char *path, const char *body,
                       "\r\n%s", strlen(out), out);
 }
 
+/* The outcome of considering a retained (rotated) key for the KEM
+ * advertisement signer set. */
+enum retained_signer_outcome {
+    /* The key co-signs the advertisement. */
+    RETAINED_SIGNER_ADMITTED,
+    /* The key was never a signer, so skipping it is expected and
+     * stays silent. */
+    RETAINED_SIGNER_NEVER_WAS,
+    /* The key is permitted to sign but cannot produce a signature:
+     * the only drop worth a log line. */
+    RETAINED_SIGNER_CANNOT_SIGN,
+};
+
 /* A retained (rotated) key may co-sign the KEM advertisement only
  * when it can produce a signature on its own: jose_jws_sig is
  * all-or-nothing over the key array, so one unusable retained key
  * would make jwk_sign() fail and take down every /adv-kem/<thp>
- * with a 404 while /adv stays healthy. kty AKP is skipped entirely,
- * like prepare_payload_and_sign() diverts it: RFC 9864 AKP also
- * covers signature algorithms (e.g. ML-DSA), so a jose that supports
- * them could sign with an AKP key, but tang treats AKP keys as
- * hybrid exchange keys only, never as classical signers. Every other
- * class of unusable key -- not permitted to sign, no private
- * material, or no inferable signature algorithm, e.g. an ECMR key
- * with key_ops deleted, which passes the permission check because
- * unrestricted keys are admitted -- is caught by the shared probe
+ * with a 404 while /adv stays healthy.
+ *
+ * Keys that were never signers are skipped silently: kty AKP is
+ * diverted from the signing set exactly like
+ * prepare_payload_and_sign() diverts it (RFC 9864 AKP also covers
+ * signature algorithms, e.g. ML-DSA, so a jose that supports them
+ * could sign with an AKP key, but tang treats AKP keys as hybrid
+ * exchange keys only), and a key not permitted to sign, such as the
+ * deriveKey-only ECMR key every rotation leaves behind, was never a
+ * signer either. Logging these would only write publicly
+ * triggerable noise: the /adv-kem/<thp> thumbprints are public, and
+ * the line count grows with every rotation.
+ *
+ * Every other class of unusable key -- permitted to sign, yet with
+ * no private material or no inferable signature algorithm, e.g. an
+ * ECMR key with key_ops deleted, which passes the permission check
+ * because unrestricted keys are admitted, or a public-only key that
+ * kept its key_ops -- is caught by the shared probe
  * jwk_can_produce_signature(), the same one the active signer set
- * is admitted with. */
-static int
-jwk_usable_as_retained_signer(const json_t *jwk)
+ * is admitted with, and reported through the skip log. */
+static enum retained_signer_outcome
+classify_retained_signer(const json_t *jwk)
 {
     const char *kty = json_string_value(json_object_get(jwk, "kty"));
-    if (!kty || strcmp(kty, "AKP") == 0)
-        return 0;
+    if (kty && strcmp(kty, "AKP") == 0)
+        return RETAINED_SIGNER_NEVER_WAS;
 
-    return jwk_can_produce_signature(jwk);
+    if (!jwk_valid_for_signing(jwk))
+        return RETAINED_SIGNER_NEVER_WAS;
+
+    return jwk_can_produce_signature(jwk)
+        ? RETAINED_SIGNER_ADMITTED
+        : RETAINED_SIGNER_CANNOT_SIGN;
 }
 
 /* A retained key dropped from the signer set is invisible in the
  * advertisement: bindings frozen while it was active stop verifying,
- * so say why in the log instead of dropping it silently. */
+ * so say why in the log instead of dropping it silently. Reached
+ * only for keys that were permitted to sign but could not -- see
+ * classify_retained_signer() for the keys that skip silently. */
 static void
 log_skipped_retained_signer(const json_t *jwk)
 {
@@ -816,12 +845,17 @@ find_jws_kem_by_thp(struct tang_keys_info *keys_info, const char *thumbprint)
     size_t idx;
     json_t *jwk;
     json_array_foreach(keys_info->m_rotated_keys, idx, jwk) {
-        if (!jwk_usable_as_retained_signer(jwk)) {
+        switch (classify_retained_signer(jwk)) {
+        case RETAINED_SIGNER_ADMITTED:
+            if (json_array_append(sign, jwk) < 0)
+                return NULL;
+            break;
+        case RETAINED_SIGNER_CANNOT_SIGN:
             log_skipped_retained_signer(jwk);
-            continue;
+            break;
+        case RETAINED_SIGNER_NEVER_WAS:
+            break;
         }
-        if (json_array_append(sign, jwk) < 0)
-            return NULL;
     }
 
     json_auto_t *signed_keys = jwk_sign(payload, sign);

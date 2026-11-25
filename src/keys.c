@@ -23,8 +23,10 @@
 #include <dirent.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <stdarg.h>
 
 #include <jose/b64.h>
+#include <jose/cfg.h>
 #include <jose/jwk.h>
 #include <jose/jws.h>
 
@@ -210,11 +212,23 @@ jwk_valid_for_signing_and_verifying(const json_t* jwk)
  * uses for the signer requested by thumbprint. Exported for the unit
  * tests; the KEM advertisement path no longer uses it, and admits
  * retained signers only when jose_jws_sig can actually sign with
- * them (see jwk_usable_as_retained_signer in pqc.c). */
+ * them (see classify_retained_signer in pqc.c). */
 int
 jwk_valid_for_signing(const json_t* jwk)
 {
     return jwk_valid_for(jwk, "sign");
+}
+
+/* A jose error handler that discards everything. The signature probe
+ * below fails by design on every key it rejects, and jose's default
+ * handler prints each failure to stderr (e.g. jws.c,
+ * JOSE_CFG_ERR_ALG_NOINFER), mixing jose-internal lines into the log
+ * on every advertisement fetch. The callers decide what a failed
+ * probe means and log their own message when it matters. */
+static void
+quiet_jose_error(void *misc, const char *file, int line, uint64_t err,
+                 const char *fmt, va_list ap)
+{
 }
 
 /* True when a signature can actually be produced with this key
@@ -225,7 +239,9 @@ jwk_valid_for_signing(const json_t* jwk)
  * jose_jwk_prm() only inspects use/key_ops: a hand-edited
  * public-only key that kept its key_ops passes them -- unlike the
  * output of "jose jwk pub", which drops the sign operation -- while
- * nothing can ever sign with it. */
+ * nothing can ever sign with it. The probe runs under a quiet jose
+ * configuration: a failure here is an expected outcome the callers
+ * interpret, not something jose needs to report on stderr. */
 int
 jwk_can_produce_signature(const json_t* jwk)
 {
@@ -238,7 +254,13 @@ jwk_can_produce_signature(const json_t* jwk)
     if (!signers || !probe || json_array_append(signers, (json_t*)jwk) < 0) {
         return 0;
     }
-    return jose_jws_sig(NULL, probe, NULL, signers);
+
+    jose_cfg_auto_t* cfg = jose_cfg();
+    if (!cfg) {
+        return 0;
+    }
+    jose_cfg_set_err_func(cfg, quiet_jose_error, NULL);
+    return jose_jws_sig(cfg, probe, NULL, signers);
 }
 
 /* True for JWKs carrying private material: an exchange key without

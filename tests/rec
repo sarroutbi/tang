@@ -137,6 +137,31 @@ rec_error_cases () {
         --data-binary @$TMP/exc.pub.jwk \
         "http://127.0.0.1:$PORT/${1}rec/${sig_kid}")
     [ "$code" = "403" ]
+
+    # An ECMR key with its alg removed must be refused with 403: the
+    # shared recovery predicate requires alg ECMR. The tightening is
+    # deliberate -- /rec used to accept an alg-less server key, but
+    # no binding can exist for one, since the classic pin requires
+    # the alg member to build one.
+    jose jwk gen -i '{"alg":"ECMR","key_ops":["deriveKey"]}' \
+        | jose fmt -j- -Od alg -o $TMP/db/ecmr-noalg.jwk
+    noalg_kid=$(jose jwk thp -i $TMP/db/ecmr-noalg.jwk)
+    code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+        -H "Content-Type: application/jwk+json" \
+        --data-binary @$TMP/exc.pub.jwk \
+        "http://127.0.0.1:$PORT/${1}rec/${noalg_kid}")
+    [ "$code" = "403" ]
+
+    # An ECMR key with an empty private member is equally unusable:
+    # the predicate requires non-empty private material.
+    jose jwk gen -i '{"alg":"ECMR","key_ops":["deriveKey"]}' \
+        | jose fmt -j- -q "" -s d -U -o $TMP/db/ecmr-emptyd.jwk
+    emptyd_kid=$(jose jwk thp -i $TMP/db/ecmr-emptyd.jwk)
+    code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+        -H "Content-Type: application/jwk+json" \
+        --data-binary @$TMP/exc.pub.jwk \
+        "http://127.0.0.1:$PORT/${1}rec/${emptyd_kid}")
+    [ "$code" = "403" ]
 }
 
 rec_kem_test () {

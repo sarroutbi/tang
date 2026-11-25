@@ -164,7 +164,11 @@ rec(http_method_t method, const char *path, const char *body,
     /* The same predicate advertising, healing and /rec-kem use, so a
      * key is recoverable here exactly when it could have been
      * advertised: kty EC, alg ECMR, deriveKey (req = true) and
-     * non-empty private material. */
+     * non-empty private material. Sharing it deliberately tightens
+     * /rec, which used to accept a server key with no alg member:
+     * no binding can exist for such a key -- the classic pin
+     * requires the alg member to build one -- so refusing it with
+     * 403 breaks no existing client. */
     if (!jwk_valid_for_ecmr_recovery(jwk))
         return http_reply(HTTP_STATUS_FORBIDDEN, NULL);
 
